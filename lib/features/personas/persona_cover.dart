@@ -16,6 +16,25 @@ String? resolvePersonaCoverUrl(String baseUrl, String? coverUrl) {
   }
   final b = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
   final path = coverUrl.startsWith('/') ? coverUrl : '/$coverUrl';
+  // 服务端已 percent-encode：直接拼接，避免二次编码导致 404
+  if (path.contains('%')) {
+    return '$b$path';
+  }
+  if (RegExp(r'[^\x00-\x7F]').hasMatch(path)) {
+    final qIdx = path.indexOf('?');
+    final pathOnly = qIdx >= 0 ? path.substring(0, qIdx) : path;
+    final queryOnly = qIdx >= 0 ? path.substring(qIdx + 1) : null;
+    final base = Uri.parse(b);
+    final segments =
+        pathOnly.split('/').where((s) => s.isNotEmpty).toList(growable: false);
+    return Uri(
+      scheme: base.scheme,
+      host: base.host,
+      port: base.hasPort ? base.port : null,
+      pathSegments: segments,
+      query: queryOnly,
+    ).toString();
+  }
   return '$b$path';
 }
 

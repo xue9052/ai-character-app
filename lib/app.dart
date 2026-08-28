@@ -22,15 +22,13 @@ class _AppRootState extends State<AppRoot> {
       ChatListPage(isActive: _index == 1),
       const SettingsPage(),
     ];
-    final homeSelected = _index == 0;
     return Scaffold(
-      backgroundColor: homeSelected ? AppColors.bgLight : AppColors.bgDark,
+      backgroundColor: AppColors.bgDark,
       body: IndexedStack(index: _index, children: pages),
       bottomNavigationBar: NavigationBarTheme(
         data: NavigationBarThemeData(
-          backgroundColor: homeSelected ? Colors.white : const Color(0xFF151528),
-          indicatorColor:
-              AppColors.primary.withValues(alpha: homeSelected ? 0.14 : 0.25),
+          backgroundColor: const Color(0xFF151528),
+          indicatorColor: AppColors.primary.withValues(alpha: 0.25),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             final selected = states.contains(WidgetState.selected);
             return TextStyle(

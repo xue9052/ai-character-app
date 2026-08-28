@@ -11,6 +11,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../api/api_client.dart';
 import '../../api/models.dart';
+import '../../services/chat_local_store.dart';
 import '../../services/app_state.dart';
 import '../../services/greeting_prefs.dart';
 import '../../theme/app_theme.dart';
@@ -20,7 +21,6 @@ import '../memory/memory_page.dart';
 import '../personas/persona_cover.dart';
 import '../personas/persona_detail_page.dart';
 import '../personas/persona_presets.dart';
-import 'chat_quick_replies.dart';
 import 'voice_call_page.dart';
 
 class _TtsSeg {
@@ -86,6 +86,7 @@ class _ChatPageState extends State<ChatPage> {
   BondDto? _bond;
   bool _sending = false;
   bool _historyLoading = true;
+  bool _historyRefreshing = false;
   bool _loadingMore = false;
   bool _hasMoreHistory = false;
   /// 当前已加载区间在全量历史中的起始下标（用于 before_index 上拉）
@@ -145,7 +146,33 @@ class _ChatPageState extends State<ChatPage> {
       if (w != null && !w.isCompleted) w.complete();
       if (mounted) setState(() => _playingMsgId = null);
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadHistory());
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final s = AppStateScope.of(context);
+      var fromCache = false;
+
+      final local = await ChatLocalStore.instance.loadBootstrap(
+        s.userId,
+        widget.personaId,
+      );
+      if (local != null && mounted) {
+        _applyBootstrapData(local);
+        fromCache = true;
+      } else {
+        final mem = s.chatBootstrapCache(widget.personaId);
+        if (mem != null && mounted) {
+          _applyBootstrapData(mem);
+          fromCache = true;
+        }
+      }
+
+      if (fromCache && mounted) {
+        setState(() {
+          _historyLoading = false;
+          _historyRefreshing = true;
+        });
+      }
+      if (mounted) _loadHistory(fromCache: fromCache);
+    });
   }
 
   @override
@@ -164,14 +191,94 @@ class _ChatPageState extends State<ChatPage> {
     // 返回列表前再推一次最后一句，防止中途预览被静默 API 覆盖
     if (_messages.isEmpty || !mounted) return;
     final last = _messages.last;
+    final text = _listPreviewText(
+      text: last.text,
+      fromUser: last.isUser,
+      msgId: last.id,
+    );
+    if (text.isEmpty) return;
     AppStateScope.of(context).updateSessionPreview(
       personaId: widget.personaId,
       personaName: widget.personaName,
       oneLiner: _oneLiner,
-      text: last.text,
+      text: text,
       fromUser: last.isUser,
       totalMessages: _previewTotal(),
     );
+    unawaited(_persistLocalSnapshot());
+  }
+
+  Future<void> _persistLocalSnapshot() async {
+    if (_messages.isEmpty || !mounted) return;
+    final s = AppStateScope.of(context);
+    final raw = <Map<String, dynamic>>[];
+    final baseTs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    for (var i = 0; i < _messages.length; i++) {
+      final m = _messages[i];
+      final segs = _orderedSegs(m.id);
+      final map = <String, dynamic>{
+        'id': m.id,
+        'role': m.isUser ? 'user' : 'assistant',
+        'content': m.text,
+        'ts': baseTs - (_messages.length - i),
+      };
+      if (segs.isNotEmpty) {
+        map['payload'] = {
+          'text': m.text,
+          'tts_chunks': [
+            for (final seg in segs)
+              {
+                'seq': seg.seq,
+                'text': seg.text,
+                'audio_url': seg.url,
+                'error': seg.error,
+              },
+          ],
+        };
+      }
+      raw.add(map);
+    }
+
+    final bond = _bond;
+    final data = <String, dynamic>{
+      'session_id': _sessionId,
+      'messages': raw,
+      'start_index': _historyStartIndex,
+      'end_index': _historyStartIndex + raw.length,
+      'total_messages': _previewTotal(),
+      'has_more': _hasMoreHistory,
+      if (bond != null)
+        'bond': {
+          'bond': bond.bond,
+          'stage': bond.stage,
+          'stage_label': bond.stageLabel,
+          'progress_in_stage': bond.progressInStage,
+        },
+      'persona': {
+        'id': widget.personaId,
+        'name': widget.personaName,
+        'one_liner': _oneLiner ?? widget.personaOneLiner,
+        'greeting': _greetingText,
+        'cover_url': _coverUrl ?? widget.personaCoverUrl,
+        'cover_emoji': _coverEmoji ?? widget.personaCoverEmoji,
+        'cover_color': _coverColor ?? widget.personaCoverColor,
+        'background_key': _backgroundKey ?? widget.personaBackgroundKey,
+        'background_url': _backgroundUrl ?? widget.personaBackgroundUrl,
+        'voice_profile_id': _voiceProfileId,
+      },
+    };
+
+    await ChatLocalStore.instance.saveBootstrap(
+      s.userId,
+      widget.personaId,
+      data,
+      personaName: widget.personaName,
+      oneLiner: _oneLiner ?? widget.personaOneLiner,
+      coverUrl: _coverUrl ?? widget.personaCoverUrl,
+      coverEmoji: _coverEmoji ?? widget.personaCoverEmoji,
+      coverColor: _coverColor ?? widget.personaCoverColor,
+    );
+    s.setChatBootstrapCache(widget.personaId, data);
   }
 
   int _previewTotal() {
@@ -179,6 +286,23 @@ class _ChatPageState extends State<ChatPage> {
     final loaded = _historyStartIndex + n;
     if (_historyTotal > loaded) return _historyTotal;
     return loaded;
+  }
+
+  /// 会话列表预览：多气泡 assistant 取最后一段，避免单行省略只露出第一句。
+  String _listPreviewText({
+    required String text,
+    required bool fromUser,
+    String? msgId,
+  }) {
+    if (fromUser) return text.trim();
+    if (msgId != null) {
+      final segs = _orderedSegs(msgId);
+      if (segs.isNotEmpty) {
+        final last = segs.last.text.trim();
+        if (last.isNotEmpty) return last;
+      }
+    }
+    return text.trim();
   }
 
   List<ChatMessage> _mapRawMessages(
@@ -249,7 +373,8 @@ class _ChatPageState extends State<ChatPage> {
     if (!_scroll.hasClients || _historyLoading || _loadingMore || !_hasMoreHistory) {
       return;
     }
-    if (_scroll.position.pixels <= 72) {
+    final pos = _scroll.position;
+    if (pos.pixels >= pos.maxScrollExtent - 72) {
       _loadOlderMessages();
     }
   }
@@ -312,10 +437,39 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  Future<void> _loadHistory() async {
+  void _applyBootstrapData(Map<String, dynamic> data) {
+    _sessionId = data['session_id'] as String?;
+    final emo = EmotionDto.fromJson(
+      data['emotion'] is Map
+          ? Map<String, dynamic>.from(data['emotion'] as Map)
+          : null,
+    );
+    _emotionLabel = emo.label;
+    final raw = (data['messages'] as List?) ?? [];
+    final start = (data['start_index'] as num?)?.toInt() ?? 0;
+    _messages
+      ..clear()
+      ..addAll(_mapRawMessages(raw, indexOffset: start));
+    _applyHistoryPageMeta(data);
+    _greetingOnly = false;
+    _greetingText = null;
+    _error = null;
+
+    final bondRaw = data['bond'];
+    if (bondRaw is Map) {
+      _bond = BondDto.fromJson(Map<String, dynamic>.from(bondRaw));
+    }
+
+    final personaRaw = data['persona'];
+    if (personaRaw is Map) {
+      _applyPersonaLite(Map<String, dynamic>.from(personaRaw));
+    }
+  }
+
+  Future<void> _loadHistory({bool fromCache = false}) async {
     final s = AppStateScope.of(context);
     final api = s.api();
-    if (mounted) setState(() => _historyLoading = true);
+    if (mounted && !fromCache) setState(() => _historyLoading = true);
     try {
       Map<String, dynamic> data;
       try {
@@ -333,48 +487,45 @@ class _ChatPageState extends State<ChatPage> {
         );
       }
 
-      _sessionId = data['session_id'] as String?;
-      final emo = EmotionDto.fromJson(
-        data['emotion'] is Map
-            ? Map<String, dynamic>.from(data['emotion'] as Map)
-            : null,
+      s.setChatBootstrapCache(widget.personaId, data);
+      await ChatLocalStore.instance.saveBootstrap(
+        s.userId,
+        widget.personaId,
+        data,
+        personaName: widget.personaName,
+        oneLiner: _oneLiner ?? widget.personaOneLiner,
+        coverUrl: _coverUrl ?? widget.personaCoverUrl,
+        coverEmoji: _coverEmoji ?? widget.personaCoverEmoji,
+        coverColor: _coverColor ?? widget.personaCoverColor,
       );
-      _emotionLabel = emo.label;
-      final raw = (data['messages'] as List?) ?? [];
-      final start = (data['start_index'] as num?)?.toInt() ?? 0;
-      _messages
-        ..clear()
-        ..addAll(_mapRawMessages(raw, indexOffset: start));
-      _applyHistoryPageMeta(data);
-      _greetingOnly = false;
-      _greetingText = null;
-      _error = null;
+      _applyBootstrapData(data);
 
-      final bondRaw = data['bond'];
-      if (bondRaw is Map) {
-        _bond = BondDto.fromJson(Map<String, dynamic>.from(bondRaw));
-      }
-
-      final personaRaw = data['persona'];
-      if (personaRaw is Map) {
-        _applyPersonaLite(Map<String, dynamic>.from(personaRaw));
-      } else {
+      if (_bond == null || data['persona'] == null) {
         try {
           final persona = await api.getPersona(s.userId, widget.personaId);
           _applyPersonaDetail(persona);
         } catch (_) {/* ignore */}
       }
 
-      await _maybeSeedGreeting(api, s);
-
       if (mounted) {
-        setState(() => _historyLoading = false);
-        _scrollToBottom();
+        setState(() {
+          _historyLoading = false;
+          _historyRefreshing = false;
+        });
+        _scrollToBottom(animated: false, force: !fromCache);
         _maybeApplyInitialDraft();
       }
+
+      // 开场白落库不阻塞首屏；有历史时几乎立即返回
+      unawaited(_maybeSeedGreeting(api, s));
     } catch (e) {
       _error = apiErrorMessage(e);
-      if (mounted) setState(() => _historyLoading = false);
+      if (mounted) {
+        setState(() {
+          _historyLoading = false;
+          _historyRefreshing = false;
+        });
+      }
     }
   }
 
@@ -459,12 +610,12 @@ class _ChatPageState extends State<ChatPage> {
             totalMessages: 1,
           );
         }
-        try {
-          _bond = await api.getBond(
-            userId: s.userId,
-            personaId: widget.personaId,
-          );
-        } catch (_) {/* ignore */}
+        if (mounted) {
+          setState(() {
+            _greetingOnly = _messages.length == 1 && _messages.first.isAssistant;
+          });
+          _scrollToBottom(animated: false);
+        }
       }
     } else if (_messages.length == 1 &&
         _messages.first.isAssistant &&
@@ -493,6 +644,8 @@ class _ChatPageState extends State<ChatPage> {
         userId: s.userId,
         personaId: widget.personaId,
       );
+      s.clearChatBootstrapCache(widget.personaId);
+      await ChatLocalStore.instance.clearSession(s.userId, widget.personaId);
       await GreetingPrefs.setSkipped(
         userId: s.userId,
         personaId: widget.personaId,
@@ -518,15 +671,36 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 280),
-        curve: Curves.easeOut,
-      );
-    });
+  bool _isNearBottom() {
+    if (!_scroll.hasClients) return true;
+    return _scroll.offset.abs() < 4;
+  }
+
+  void _scrollToBottom({bool animated = true, bool force = false}) {
+    if (!force && _isNearBottom()) return;
+
+    Future<void> run(int left) async {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || !_scroll.hasClients) return;
+      const target = 0.0;
+      if (animated && left <= 1) {
+        await _scroll.animateTo(
+          target,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+        );
+      } else {
+        _scroll.jumpTo(target);
+      }
+      if (left <= 1 || !mounted || !_scroll.hasClients) return;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      if (!mounted || !_scroll.hasClients) return;
+      if (!_isNearBottom()) {
+        await run(left - 1);
+      }
+    }
+
+    unawaited(run(4));
   }
 
   void _applyBond(dynamic raw) {
@@ -729,7 +903,7 @@ class _ChatPageState extends State<ChatPage> {
           ),
         );
       });
-      _pushPreview(reply, fromUser: false);
+      _pushPreview(reply, fromUser: false, msgId: replyId);
       if (fb is Map && mounted) {
         final toast = '${fb['toast'] ?? ''}';
         if (toast.isNotEmpty) {
@@ -824,13 +998,19 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  void _pushPreview(String text, {required bool fromUser}) {
+  void _pushPreview(String text, {required bool fromUser, String? msgId}) {
     if (!mounted) return;
+    final preview = _listPreviewText(
+      text: text,
+      fromUser: fromUser,
+      msgId: msgId,
+    );
+    if (preview.isEmpty) return;
     AppStateScope.of(context).updateSessionPreview(
       personaId: widget.personaId,
       personaName: widget.personaName,
       oneLiner: _oneLiner,
-      text: text,
+      text: preview,
       fromUser: fromUser,
       totalMessages: _previewTotal(),
     );
@@ -893,20 +1073,23 @@ class _ChatPageState extends State<ChatPage> {
         ),
       );
     });
-    _pushPreview(reply, fromUser: false);
-    await _refreshBond();
     if (mounted && reply.trim().isNotEmpty) {
       final chunks = _chunksFromChatPayload(Map<String, dynamic>.from(data));
-      _applyBackendChunks(
-        replyId,
-        chunks,
-        stagger: true,
-        revealAll: false,
-      );
+      if (chunks.isNotEmpty) {
+        _applyBackendChunks(
+          replyId,
+          chunks,
+          stagger: true,
+          revealAll: false,
+        );
+      }
       if (autoVoice) {
         unawaited(_synthSegsInOrder(replyId));
       }
     }
+    _pushPreview(reply, fromUser: false, msgId: replyId);
+    await _refreshBond();
+    unawaited(_persistLocalSnapshot());
   }
 
   Future<void> _sendStream(ApiClient api, AppState s, String trimmed) async {
@@ -1041,7 +1224,7 @@ class _ChatPageState extends State<ChatPage> {
         });
       }
     } else if (assembled.isNotEmpty) {
-      _pushPreview(assembled, fromUser: false);
+      _pushPreview(assembled, fromUser: false, msgId: assistantId);
       if (mounted) {
         if (gotTtsChunks) {
           // 只同步全文到消息（供预览/复制），展示仍只看 visible 段
@@ -1069,6 +1252,7 @@ class _ChatPageState extends State<ChatPage> {
       }
     }
     await _refreshBond();
+    unawaited(_persistLocalSnapshot());
   }
 
   void _openMore() {
@@ -1127,6 +1311,8 @@ class _ChatPageState extends State<ChatPage> {
                     userId: s.userId,
                     personaId: widget.personaId,
                   );
+                  s.clearChatBootstrapCache(widget.personaId);
+      await ChatLocalStore.instance.clearSession(s.userId, widget.personaId);
                   await GreetingPrefs.setSkipped(
                     userId: s.userId,
                     personaId: widget.personaId,
@@ -1274,7 +1460,7 @@ class _ChatPageState extends State<ChatPage> {
           ),
         );
       });
-      _pushPreview(reply, fromUser: false);
+      _pushPreview(reply, fromUser: false, msgId: replyId);
     } catch (e) {
       if (!mounted) return;
       // 失败时重新拉历史，避免本地与服务器不一致
@@ -1368,6 +1554,10 @@ class _ChatPageState extends State<ChatPage> {
         (_voiceProfileId ?? '').trim().isNotEmpty;
     // 有后端段就走分段气泡（哪怕暂时只露 1 条），禁止用 m.text 全文冒充单气泡
     final useSegs = !isUser && segs.isNotEmpty && shownSegs.isNotEmpty;
+    // 关自动朗读时后端仍可能推纯文本段；此时段内无音频芯片，需在顶部保留手动播放
+    final anySegAudioUi = useSegs && shownSegs.any(_segHasAudioUi);
+    final showTopPlay =
+        hasVoice && m.text.trim() != '…' && (!useSegs || !anySegAudioUi);
     final Widget textBubble;
     if (sticker) {
       textBubble = Container(
@@ -1449,18 +1639,11 @@ class _ChatPageState extends State<ChatPage> {
           isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
         ...mediaChildren,
-        if (hasVoice && !useSegs && m.text.trim() != '…')
+        if (showTopPlay)
           Padding(
             padding: const EdgeInsets.only(bottom: 4),
             child: InkWell(
-              onTap: () {
-                final first = _orderedSegs(m.id);
-                if (first.isNotEmpty) {
-                  unawaited(_onSegAudioTap(m.id, first.first));
-                } else {
-                  unawaited(_playMessageTts(m));
-                }
-              },
+              onTap: () => unawaited(_playMessageTts(m)),
               borderRadius: BorderRadius.circular(999),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1692,6 +1875,11 @@ class _ChatPageState extends State<ChatPage> {
       if (n > target) return;
       setState(() => _segVisibleCount[msgId] = n);
       _scrollToBottom();
+    }
+    if (!mounted || _segStaggerGen[msgId] != gen) return;
+    final segs = _orderedSegs(msgId);
+    if (segs.isNotEmpty) {
+      _pushPreview(segs.last.text, fromUser: false, msgId: msgId);
     }
   }
 
@@ -2273,6 +2461,12 @@ class _ChatPageState extends State<ChatPage> {
       ),
       body: Column(
         children: [
+          if (_historyRefreshing)
+            const LinearProgressIndicator(
+              minHeight: 2,
+              backgroundColor: Colors.transparent,
+              color: AppColors.primaryLight,
+            ),
           Expanded(
             child: Stack(
               children: [
@@ -2328,22 +2522,36 @@ class _ChatPageState extends State<ChatPage> {
                 else
                   ListView.builder(
                     controller: _scroll,
+                    reverse: true,
+                    physics: const AlwaysScrollableScrollPhysics(
+                      parent: BouncingScrollPhysics(),
+                    ),
+                    cacheExtent: 2400,
                     padding: EdgeInsets.fromLTRB(
                       12,
+                      16 + MediaQuery.paddingOf(context).bottom,
+                      12,
                       MediaQuery.paddingOf(context).top + kToolbarHeight + 8,
-                      12,
-                      12,
                     ),
-                    itemCount: (_hasMoreHistory || _loadingMore ? 1 : 0) +
-                        _messages.length +
+                    itemCount: _messages.length +
                         (_sending &&
                                 (_messages.isEmpty || _messages.last.isUser)
                             ? 1
-                            : 0),
+                            : 0) +
+                        ((_hasMoreHistory || _loadingMore) ? 1 : 0),
                     itemBuilder: (context, i) {
-                      final header =
-                          (_hasMoreHistory || _loadingMore) ? 1 : 0;
-                      if (header == 1 && i == 0) {
+                      final typing = _sending &&
+                              (_messages.isEmpty || _messages.last.isUser)
+                          ? 1
+                          : 0;
+                      if (typing == 1 && i == 0) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: TypingIndicator(),
+                        );
+                      }
+                      final fromBottom = i - typing;
+                      if (fromBottom >= _messages.length) {
                         return Padding(
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           child: Center(
@@ -2368,13 +2576,7 @@ class _ChatPageState extends State<ChatPage> {
                           ),
                         );
                       }
-                      final mi = i - header;
-                      if (mi >= _messages.length) {
-                        return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 8),
-                          child: TypingIndicator(),
-                        );
-                      }
+                      final mi = _messages.length - 1 - fromBottom;
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _bubbleRow(
@@ -2427,9 +2629,6 @@ class _ChatPageState extends State<ChatPage> {
             enabled: !_sending,
             sending: _sending,
             hint: '输入消息...',
-            personaName: widget.personaName,
-            showOpeners: _messages.isEmpty || _greetingOnly,
-            extraChips: _bond?.quickRepliesExtra ?? const [],
             onGift: _sendGift,
             resolveAbsoluteUrl: (u) => AppStateScope.of(context).api().resolveUrl(u),
             onPickImage: _pickAndEditImage,
@@ -3300,10 +3499,7 @@ class _ComposerBar extends StatefulWidget {
     required this.enabled,
     required this.sending,
     required this.hint,
-    required this.personaName,
-    required this.showOpeners,
     required this.onSubmit,
-    this.extraChips = const [],
     this.onGift,
     this.resolveAbsoluteUrl,
     this.onPickImage,
@@ -3314,10 +3510,7 @@ class _ComposerBar extends StatefulWidget {
   final bool enabled;
   final bool sending;
   final String hint;
-  final String personaName;
-  final bool showOpeners;
   final VoidCallback onSubmit;
-  final List<String> extraChips;
   final Future<void> Function(GiftDto gift)? onGift;
   final String Function(String url)? resolveAbsoluteUrl;
   final VoidCallback? onPickImage;
@@ -3354,29 +3547,8 @@ class _ComposerBarState extends State<_ComposerBar> {
     }
   }
 
-  void _applyChip(String phrase) {
-    if (!widget.enabled) return;
-    final cur = widget.controller.text.trimRight();
-    if (cur.isEmpty) {
-      widget.controller.text = phrase;
-    } else {
-      widget.controller.text = '$cur\n$phrase';
-    }
-    widget.controller.selection = TextSelection.collapsed(
-      offset: widget.controller.text.length,
-    );
-    widget.focusNode.requestFocus();
-  }
-
   @override
   Widget build(BuildContext context) {
-    final chips = <String>[
-      ...(widget.showOpeners
-          ? ChatQuickReplies.openers(personaName: widget.personaName)
-          : ChatQuickReplies.followUps()),
-      ...widget.extraChips,
-    ];
-
     return Material(
       color: AppColors.bgDark.withValues(alpha: 0.94),
       elevation: 0,
@@ -3385,25 +3557,7 @@ class _ComposerBarState extends State<_ComposerBar> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SizedBox(
-              height: 40,
-              child: ListView.separated(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-                scrollDirection: Axis.horizontal,
-                itemCount: chips.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (context, i) {
-                  final t = chips[i];
-                  return ActionChip(
-                    label: Text(t, style: const TextStyle(fontSize: 13)),
-                    visualDensity: VisualDensity.compact,
-                    backgroundColor: Colors.white.withValues(alpha: 0.08),
-                    side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
-                    onPressed: widget.enabled ? () => _applyChip(t) : null,
-                  );
-                },
-              ),
-            ),
+            // 输入框上方快捷句标签暂隐藏
             // 亲密贴纸面板已下线，不再展示
             if (_giftOpen)
               Padding(

@@ -41,6 +41,8 @@ class AppNetworkImage extends StatelessWidget {
     this.width,
     this.height,
     this.alignment = Alignment.center,
+    this.memCacheWidth,
+    this.memCacheHeight,
     this.placeholder,
     this.errorWidget,
   });
@@ -50,6 +52,8 @@ class AppNetworkImage extends StatelessWidget {
   final double? width;
   final double? height;
   final Alignment alignment;
+  final int? memCacheWidth;
+  final int? memCacheHeight;
   final Widget Function(BuildContext context, String url)? placeholder;
   final Widget Function(BuildContext context, String url, Object error)?
       errorWidget;
@@ -64,6 +68,8 @@ class AppNetworkImage extends StatelessWidget {
       width: width,
       height: height,
       alignment: alignment,
+      memCacheWidth: memCacheWidth,
+      memCacheHeight: memCacheHeight,
       fadeInDuration: const Duration(milliseconds: 180),
       fadeOutDuration: const Duration(milliseconds: 80),
       placeholder: placeholder ??

@@ -7,11 +7,27 @@ import 'api_exception.dart';
 import 'models.dart';
 
 class ApiClient {
-  ApiClient(this.baseUrl, {this.onUnauthorized});
+  ApiClient(this.baseUrl, {this.accessToken, this.onUnauthorized});
 
   final String baseUrl;
+  /// 登录态 JWT；用户相关接口必带
+  final String? accessToken;
   /// 收到 401 时回调（通常用于清登录态回到登录页）
   final FutureOr<void> Function()? onUnauthorized;
+
+  Map<String, String> _headers({
+    bool json = false,
+    bool auth = true,
+    Map<String, String>? extra,
+  }) {
+    final h = <String, String>{if (extra != null) ...extra};
+    if (json) h['Content-Type'] = 'application/json';
+    final t = accessToken?.trim();
+    if (auth && t != null && t.isNotEmpty) {
+      h['Authorization'] = 'Bearer $t';
+    }
+    return h;
+  }
 
   Uri _u(String path, [Map<String, String>? q]) {
     final b = baseUrl.replaceAll(RegExp(r'/$'), '');
@@ -30,7 +46,7 @@ class ApiClient {
   Future<PlazaFeed> listPlaza(String userId, {String? tag}) async {
     final q = <String, String>{'user_id': userId};
     if (tag != null && tag.isNotEmpty) q['tag'] = tag;
-    final res = await http.get(_u('/v1/personas', q));
+    final res = await http.get(_u('/v1/personas', q), headers: _headers());
     final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     List<PersonaSummary> parseList(String primary, String fallback) {
       final raw = (data[primary] as List?) ?? (data[fallback] as List?) ?? const [];
@@ -59,9 +75,34 @@ class ApiClient {
     return feed.grid;
   }
 
+  /// 广场搜索：名字 / 简介 / 标签
+  Future<PersonaSearchResult> searchPersonas(
+    String userId, {
+    String q = '',
+    String? tag,
+    int limit = 50,
+  }) async {
+    final query = <String, String>{
+      'user_id': userId,
+      'limit': '$limit',
+    };
+    final trimmed = q.trim();
+    if (trimmed.isNotEmpty) query['q'] = trimmed;
+    if (tag != null && tag.isNotEmpty) query['tag'] = tag;
+    final res = await http.get(_u('/v1/personas/search', query), headers: _headers());
+    if (res.statusCode >= 400) {
+      throw Exception('HTTP ${res.statusCode}: ${res.body}');
+    }
+    final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    return PersonaSearchResult.fromJson(data);
+  }
+
   /// 我创建的角色（含待审 / 驳回）
   Future<List<PersonaSummary>> listMyPersonas(String userId) async {
-    final res = await http.get(_u('/v1/personas/mine', {'user_id': userId}));
+    final res = await http.get(
+      _u('/v1/personas/mine', {'user_id': userId}),
+      headers: _headers(),
+    );
     if (res.statusCode >= 400) {
       throw Exception('HTTP ${res.statusCode}: ${res.body}');
     }
@@ -75,7 +116,7 @@ class ApiClient {
 
   /// 创角模板（服务端数据库；emoji 缓存头像 + 可选封面）
   Future<List<Map<String, dynamic>>> listPersonaTemplates() async {
-    final res = await http.get(_u('/v1/persona-templates'));
+    final res = await http.get(_u('/v1/persona-templates'), headers: _headers(auth: false));
     if (res.statusCode >= 400) {
       throw Exception('HTTP ${res.statusCode}: ${res.body}');
     }
@@ -89,6 +130,7 @@ class ApiClient {
   Future<PersonaDetail> getPersona(String userId, String id) async {
     final res = await http.get(
       _u('/v1/personas/${Uri.encodeComponent(id)}', {'user_id': userId}),
+      headers: _headers(),
     );
     if (res.statusCode >= 400) {
       throw Exception('HTTP ${res.statusCode}: ${res.body}');
@@ -145,7 +187,7 @@ class ApiClient {
     };
     final res = await http.post(
       _u('/v1/personas', {'user_id': userId}),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode(body),
     );
     if (res.statusCode >= 400) {
@@ -171,6 +213,7 @@ class ApiClient {
       {'user_id': userId},
     );
     final req = http.MultipartRequest('POST', uri);
+    req.headers.addAll(_headers());
     req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
     final streamed = await req.send();
     final res = await http.Response.fromStream(streamed);
@@ -190,6 +233,7 @@ class ApiClient {
       {'user_id': userId},
     );
     final req = http.MultipartRequest('POST', uri);
+    req.headers.addAll(_headers());
     req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
     final streamed = await req.send();
     final res = await http.Response.fromStream(streamed);
@@ -199,7 +243,7 @@ class ApiClient {
   }
 
   Future<List<BackgroundPreset>> backgroundPresets() async {
-    final res = await http.get(_u('/v1/persona-background-presets'));
+    final res = await http.get(_u('/v1/persona-background-presets'), headers: _headers(auth: false));
     if (res.statusCode >= 400) {
       throw Exception('HTTP ${res.statusCode}: ${res.body}');
     }
@@ -213,7 +257,7 @@ class ApiClient {
   }
 
   Future<LookStylesPayload> lookStyles() async {
-    final res = await http.get(_u('/v1/image-gen/look-styles'));
+    final res = await http.get(_u('/v1/image-gen/look-styles'), headers: _headers(auth: false));
     if (res.statusCode >= 400) {
       throw Exception('HTTP ${res.statusCode}: ${res.body}');
     }
@@ -228,7 +272,7 @@ class ApiClient {
   }) async {
     final res = await http.post(
       _u('/v1/image-gen/persona-look'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode({
         'user_id': userId,
         if (description != null && description.trim().isNotEmpty)
@@ -250,7 +294,7 @@ class ApiClient {
   }) async {
     final res = await http.post(
       _u('/v1/image-gen/persona-look/polish'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode({
         'user_id': userId,
         'description': description,
@@ -267,6 +311,7 @@ class ApiClient {
   Future<void> deletePersona({required String userId, required String id}) async {
     final res = await http.delete(
       _u('/v1/personas/${Uri.encodeComponent(id)}', {'user_id': userId}),
+      headers: _headers(),
     );
     if (res.statusCode >= 400) {
       throw Exception('HTTP ${res.statusCode}: ${res.body}');
@@ -292,10 +337,10 @@ class ApiClient {
     }
     final res = await http.get(
       _u('/v1/users/${Uri.encodeComponent(userId)}/chat', q),
-      headers: const {
+      headers: _headers(extra: const {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-      },
+      }),
     );
     return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
   }
@@ -312,10 +357,10 @@ class ApiClient {
         'limit': '$limit',
         '_ts': '${DateTime.now().millisecondsSinceEpoch}',
       }),
-      headers: const {
+      headers: _headers(extra: const {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-      },
+      }),
     );
     final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     if (res.statusCode >= 400) {
@@ -333,10 +378,10 @@ class ApiClient {
         'limit': '$limit',
         '_ts': '${DateTime.now().millisecondsSinceEpoch}',
       }),
-      headers: const {
+      headers: _headers(extra: const {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-      },
+      }),
     );
     final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     if (res.statusCode >= 400) {
@@ -352,6 +397,7 @@ class ApiClient {
   Future<Map<String, dynamic>> getImageEditQuota({required String userId}) async {
     final res = await http.get(
       _u('/v1/chat/image-edit/quota', {'user_id': userId}),
+      headers: _headers(),
     );
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
@@ -361,7 +407,7 @@ class ApiClient {
   }
 
   Future<List<VoiceProfileDto>> listVoiceProfiles() async {
-    final res = await http.get(_u('/v1/voice-profiles'));
+    final res = await http.get(_u('/v1/voice-profiles'), headers: _headers(auth: false));
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
       _throwHttp(res, data, '获取音色列表失败');
@@ -384,7 +430,7 @@ class ApiClient {
   }) async {
     final res = await http.post(
       _u('/v1/chat/tts'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode({
         'user_id': userId,
         'persona_id': personaId,
@@ -411,6 +457,7 @@ class ApiClient {
     String? sessionId,
   }) async {
     final req = http.MultipartRequest('POST', _u('/v1/chat/image-edit'));
+    req.headers.addAll(_headers());
     req.fields['user_id'] = userId;
     req.fields['persona_id'] = personaId;
     req.fields['prompt'] = prompt;
@@ -438,6 +485,7 @@ class ApiClient {
       _u('/v1/users/${Uri.encodeComponent(userId)}/chat/seed-greeting', {
         'persona_id': personaId,
       }),
+      headers: _headers(),
     );
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
@@ -455,7 +503,7 @@ class ApiClient {
   }) async {
     final res = await http.post(
       _u('/v1/chat'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode({
         'user_id': userId,
         'persona_id': personaId,
@@ -477,6 +525,7 @@ class ApiClient {
   }) async {
     final res = await http.get(
       _u('/v1/users/${Uri.encodeComponent(userId)}/bonds/${Uri.encodeComponent(personaId)}'),
+      headers: _headers(),
     );
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
@@ -486,7 +535,7 @@ class ApiClient {
   }
 
   Future<List<GiftDto>> listGifts() async {
-    final res = await http.get(_u('/v1/gifts'));
+    final res = await http.get(_u('/v1/gifts'), headers: _headers(auth: false));
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
       _throwHttp(res, data, '加载礼物失败');
@@ -500,6 +549,7 @@ class ApiClient {
   Future<WalletDto> getWallet({required String userId}) async {
     final res = await http.get(
       _u('/v1/users/${Uri.encodeComponent(userId)}/wallet'),
+      headers: _headers(),
     );
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
@@ -537,7 +587,7 @@ class ApiClient {
   }) async {
     final res = await http.post(
       _u('/v1/chat/regenerate'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode({
         'user_id': userId,
         'persona_id': personaId,
@@ -566,8 +616,7 @@ class ApiClient {
     void Function()? onTtsDone,
   }) async* {
     final req = http.Request('POST', _u('/v1/chat/stream'));
-    req.headers['Content-Type'] = 'application/json';
-    req.headers['Accept'] = 'text/event-stream';
+    req.headers.addAll(_headers(json: true, extra: {'Accept': 'text/event-stream'}));
     req.body = jsonEncode({
       'user_id': userId,
       'persona_id': personaId,
@@ -589,6 +638,10 @@ class ApiClient {
     try {
       final res = await client.send(req);
       if (res.statusCode >= 400) {
+        if (res.statusCode == 401) {
+          final cb = onUnauthorized;
+          if (cb != null) Future.sync(cb);
+        }
         throw Exception('HTTP ${res.statusCode}');
       }
       var buf = '';
@@ -684,6 +737,7 @@ class ApiClient {
           'category': category,
         if (q != null && q.trim().isNotEmpty) 'q': q.trim(),
       }),
+      headers: _headers(),
     );
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
@@ -704,7 +758,7 @@ class ApiClient {
       _u(
         '/v1/users/${Uri.encodeComponent(userId)}/memories/${Uri.encodeComponent(memoryId)}',
       ),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode({'pinned': pinned}),
     );
     final data = _decodeMap(res);
@@ -724,6 +778,7 @@ class ApiClient {
       _u(
         '/v1/users/${Uri.encodeComponent(userId)}/memories/${Uri.encodeComponent(memoryId)}',
       ),
+      headers: _headers(),
     );
     if (res.statusCode >= 400) {
       final data = _decodeMap(res);
@@ -736,13 +791,14 @@ class ApiClient {
       _u('/v1/users/${Uri.encodeComponent(userId)}/chat', {
         'persona_id': personaId,
       }),
+      headers: _headers(),
     );
   }
 
   Future<void> clearMemory({required String userId}) async {
     await http.delete(
       _u('/v1/users/${Uri.encodeComponent(userId)}/memory'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(json: true),
       body: jsonEncode({'clear_sessions': false}),
     );
   }

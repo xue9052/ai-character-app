@@ -51,7 +51,7 @@ class _VoiceCallPageState extends State<VoiceCallPage> {
   @override
   void initState() {
     super.initState();
-    _api = ApiClient(widget.baseUrl);
+    _api = ApiClient(widget.baseUrl, accessToken: widget.accessToken);
     _debugLine = '${VoiceCallPage.buildTag} · ${widget.baseUrl}';
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _bootstrap();

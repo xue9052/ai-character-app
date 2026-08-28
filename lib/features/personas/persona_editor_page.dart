@@ -1,6 +1,7 @@
 ﻿import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
 import '../../api/api_exception.dart';
@@ -43,8 +44,8 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
   bool _saving = false;
   String? _loadError;
   String? _appliedTemplateId;
-  List<PersonaTemplate> _templates = List.of(kPersonaTemplatesFallback);
-  bool _templatesLoading = false;
+  List<PersonaTemplate> _templates = const [];
+  bool _templatesLoading = true;
   String? _reviewStatus;
   String? _reviewReason;
   String _visibility = 'private';
@@ -62,6 +63,8 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
   Uint8List? _avatarBytes; // 中心正方形头像
   String? _existingCoverUrl;
   String? _existingBgUrl;
+  /// 套用模板时的封面（创角预览 + 保存时复制为角色头像）
+  String? _templateCoverUrl;
   bool get _isEdit => widget.personaId != null && widget.personaId!.isNotEmpty;
 
   @override
@@ -74,11 +77,6 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
         await _load();
       });
     } else {
-      final v = pickCreateVisualDefaults('新角色');
-      _coverEmoji = v.emoji;
-      _coverColor = v.color;
-      _backgroundKey = v.backgroundKey;
-      _nameCtrl.addListener(_onNameChangedForVisuals);
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         await _loadTemplates();
         await _loadVoiceProfiles();
@@ -132,6 +130,7 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
   }
 
   Future<void> _loadTemplates() async {
+    if (!mounted) return;
     setState(() => _templatesLoading = true);
     try {
       final s = AppStateScope.of(context);
@@ -140,39 +139,52 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
         for (final j in rows) PersonaTemplate.fromJson(j),
       ].where((t) => t.id.isNotEmpty).toList();
       if (!mounted) return;
+      final effective =
+          list.isNotEmpty ? list : List<PersonaTemplate>.of(kPersonaTemplatesFallback);
       setState(() {
-        if (list.isNotEmpty) _templates = list;
+        _templates = effective;
         _templatesLoading = false;
+        if (!_isEdit && _appliedTemplateId == null && effective.isNotEmpty) {
+          _fillFromTemplate(effective.first);
+        }
       });
     } catch (_) {
       if (!mounted) return;
-      setState(() => _templatesLoading = false);
+      final fallback = List<PersonaTemplate>.of(kPersonaTemplatesFallback);
+      setState(() {
+        _templates = fallback;
+        _templatesLoading = false;
+        if (!_isEdit && _appliedTemplateId == null && fallback.isNotEmpty) {
+          _fillFromTemplate(fallback.first);
+        }
+      });
     }
   }
 
-  void _onNameChangedForVisuals() {
-    if (_isEdit || _lookBytes != null) return;
-    final v = pickCreateVisualDefaults(
-      _nameCtrl.text,
-      tags: _tags.toList(),
-    );
-    if (_coverEmoji == v.emoji &&
-        _coverColor == v.color &&
-        _backgroundKey == v.backgroundKey) {
-      return;
-    }
-    setState(() {
-      _coverEmoji = v.emoji;
-      _coverColor = v.color;
-      _backgroundKey = v.backgroundKey;
-    });
+  void _fillFromTemplate(PersonaTemplate t) {
+    _nameCtrl.text = t.suggestedName;
+    _oneLinerCtrl.text = t.oneLiner;
+    _definitionCtrl.text = t.definition.trim();
+    _greetingCtrl.text = t.greeting;
+    _coverEmoji = t.emoji;
+    _coverColor = t.coverColor;
+    _templateCoverUrl =
+        (t.coverUrl != null && t.coverUrl!.isNotEmpty) ? t.coverUrl : null;
+    _lookBytes = null;
+    _avatarBytes = null;
+    _existingCoverUrl = null;
+    _existingBgUrl = null;
+    _partitionedMode = false;
+    _appliedTemplateId = t.id;
+    _voiceProfileId = t.voiceProfileId;
+  }
+
+  void _applyTemplateData(PersonaTemplate t) {
+    setState(() => _fillFromTemplate(t));
   }
 
   @override
   void dispose() {
-    if (!_isEdit) {
-      _nameCtrl.removeListener(_onNameChangedForVisuals);
-    }
     _nameCtrl.dispose();
     _oneLinerCtrl.dispose();
     _relationshipCtrl.dispose();
@@ -205,6 +217,7 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
         _lookBytes = bytes;
         _lookFilename = filename;
         _avatarBytes = avatar;
+        _templateCoverUrl = null;
       });
     } catch (e) {
       if (!mounted) return;
@@ -351,17 +364,7 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
       );
       if (ok != true || !mounted) return;
     }
-    setState(() {
-      _nameCtrl.text = t.suggestedName;
-      _oneLinerCtrl.text = t.oneLiner;
-      _definitionCtrl.text = t.definition.trim();
-      _greetingCtrl.text = t.greeting;
-      _coverEmoji = t.emoji;
-      _coverColor = t.coverColor;
-      _partitionedMode = false;
-      _appliedTemplateId = t.id;
-      _voiceProfileId = t.voiceProfileId;
-    });
+    _applyTemplateData(t);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('已填入「${t.title}」模板，可直接改名细调')),
     );
@@ -437,7 +440,6 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
       );
       var coverWarning = '';
       if (_lookBytes != null) {
-        // 完整长图 → 聊天背景；中心方块 → 列表/头像
         final avatar = _avatarBytes ??
             await centerSquareAvatarBytes(_lookBytes!);
         try {
@@ -461,6 +463,26 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
         } catch (e) {
           final msg = '头像裁剪上传失败：${apiErrorMessage(e)}';
           coverWarning = coverWarning.isEmpty ? msg : '$coverWarning\n$msg';
+        }
+      } else if (_templateCoverUrl != null && _templateCoverUrl!.isNotEmpty) {
+        try {
+          final url = resolvePersonaCoverUrl(s.baseUrl, _templateCoverUrl);
+          if (url != null) {
+            final res = await http.get(
+              Uri.parse(url),
+              headers: kMediaRequestHeaders,
+            );
+            if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+              await s.api().uploadPersonaCover(
+                userId: s.userId,
+                personaId: saved.id,
+                bytes: res.bodyBytes,
+                filename: 'template_cover.jpg',
+              );
+            }
+          }
+        } catch (e) {
+          coverWarning = '角色已保存，但模板头像复制失败：${apiErrorMessage(e)}';
         }
       }
       // 上传后重新拉一次，拿到 cover_url / background_url
@@ -700,15 +722,22 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
                         backgroundKey: _backgroundKey,
                         baseUrl: AppStateScope.of(context).baseUrl,
                         existingLookUrl: _existingBgUrl ?? _existingCoverUrl,
+                        previewCoverUrl: _lookBytes == null
+                            ? (_templateCoverUrl ?? _existingCoverUrl)
+                            : null,
                         lookBytes: _lookBytes,
                         avatarBytes: _avatarBytes,
+                        loading: !_isEdit &&
+                            (_templatesLoading || _appliedTemplateId == null),
                         onTap: _openLookSheet,
                       ),
                       const SizedBox(height: 8),
                       Text(
                         _lookBytes != null || _existingBgUrl != null
                             ? '已设定形象：长图作聊天背景，中间裁方为头像'
-                            : '未上传形象时：用表情头像 +「${kBackgroundPresets.firstWhere((p) => p['key'] == _backgroundKey, orElse: () => kBackgroundPresets.first)['name']}」场景背景',
+                            : (_templateCoverUrl != null
+                                ? '已使用模板头像；也可点击上传自定义形象'
+                                : '正在加载模板形象…'),
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
@@ -820,15 +849,6 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
                                     _tags.add(t);
                                   } else {
                                     _tags.remove(t);
-                                  }
-                                  if (!_isEdit && _lookBytes == null) {
-                                    final v = pickCreateVisualDefaults(
-                                      _nameCtrl.text,
-                                      tags: _tags.toList(),
-                                    );
-                                    _coverEmoji = v.emoji;
-                                    _coverColor = v.color;
-                                    _backgroundKey = v.backgroundKey;
                                   }
                                 });
                               },
@@ -1367,8 +1387,10 @@ class _AppearanceBlock extends StatelessWidget {
     required this.baseUrl,
     required this.onTap,
     this.existingLookUrl,
+    this.previewCoverUrl,
     this.lookBytes,
     this.avatarBytes,
+    this.loading = false,
   });
 
   final TextEditingController nameCtrl;
@@ -1378,8 +1400,11 @@ class _AppearanceBlock extends StatelessWidget {
   final String baseUrl;
   final VoidCallback onTap;
   final String? existingLookUrl;
+  /// 模板/已有封面（仅头像，非长图形象）
+  final String? previewCoverUrl;
   final Uint8List? lookBytes;
   final Uint8List? avatarBytes;
+  final bool loading;
 
   static const _accent = AppColors.accentCyan;
 
@@ -1393,7 +1418,11 @@ class _AppearanceBlock extends StatelessWidget {
         final networkUrl = lookBytes == null
             ? resolvePersonaBackgroundUrl(baseUrl, existingLookUrl)
             : null;
+        final coverPreviewUrl = lookBytes == null && networkUrl == null
+            ? resolvePersonaCoverUrl(baseUrl, previewCoverUrl)
+            : null;
         final hasImage = lookBytes != null || networkUrl != null;
+        final hasTemplateAvatar = coverPreviewUrl != null;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1408,7 +1437,9 @@ class _AppearanceBlock extends StatelessWidget {
                     painter: _GradientDashedRRectPainter(radius: 20),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(20),
-                      child: hasImage
+                      child: loading
+                          ? _loadingLook()
+                          : hasImage
                           ? Stack(
                               fit: StackFit.expand,
                               children: [
@@ -1418,8 +1449,7 @@ class _AppearanceBlock extends StatelessWidget {
                                   AppNetworkImage(
                                     url: networkUrl!,
                                     fit: BoxFit.cover,
-                                    errorWidget: (_, __, ___) =>
-                                        _emptyLook(label),
+                                    errorWidget: (_, __, ___) => _loadingLook(),
                                   ),
                                 IgnorePointer(
                                   child: CustomPaint(
@@ -1474,7 +1504,9 @@ class _AppearanceBlock extends StatelessWidget {
                                 ),
                               ],
                             )
-                          : _emptyLook(label),
+                          : hasTemplateAvatar
+                              ? _templateAvatarLook(coverPreviewUrl!, label)
+                              : _loadingLook(),
                     ),
                   ),
                 ),
@@ -1486,7 +1518,25 @@ class _AppearanceBlock extends StatelessWidget {
     );
   }
 
-  Widget _emptyLook(String label) {
+  Widget _loadingLook() {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1830).withValues(alpha: 0.85),
+      ),
+      child: Center(
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: Colors.white.withValues(alpha: 0.55),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _templateAvatarLook(String coverUrl, String label) {
     Map<String, String>? preset;
     for (final p in kBackgroundPresets) {
       if (p['key'] == backgroundKey) {
@@ -1507,25 +1557,36 @@ class _AppearanceBlock extends StatelessWidget {
           ],
         ),
       ),
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircleAvatar(
-              radius: 36,
-              backgroundColor: parseHexColor(colorHex),
-              child: Text(label, style: const TextStyle(fontSize: 32)),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Center(
+            child: PersonaCoverAvatar(
+              baseUrl: baseUrl,
+              coverUrl: coverUrl,
+              fallbackColor: parseHexColor(colorHex),
+              fallbackLabel: label,
+              radius: 52,
             ),
-            const SizedBox(height: 10),
-            Text(
-              '点击设定Ta的容貌、形象',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.75),
-                fontSize: 14,
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              color: Colors.black54,
+              child: const Text(
+                '点击更换形象',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

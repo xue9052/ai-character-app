@@ -161,6 +161,27 @@ class PlazaFeed {
   List<PersonaSummary> get all => grid;
 }
 
+class PersonaSearchResult {
+  PersonaSearchResult({
+    required this.items,
+    this.tagPresets = const [],
+  });
+
+  final List<PersonaSummary> items;
+  final List<String> tagPresets;
+
+  factory PersonaSearchResult.fromJson(Map<String, dynamic> j) =>
+      PersonaSearchResult(
+        items: [
+          for (final p in (j['items'] as List? ?? const []))
+            PersonaSummary.fromJson(Map<String, dynamic>.from(p as Map)),
+        ],
+        tagPresets: [
+          for (final t in (j['tag_presets'] as List? ?? const [])) '$t',
+        ],
+      );
+}
+
 class PersonaDetail {
   PersonaDetail({
     required this.id,
@@ -438,6 +459,22 @@ class ChatMessageDto {
       audioUrl: audioUrl,
       ttsChunks: chunks,
     );
+  }
+
+  /// 会话列表预览文案（多段回复取最后一段）。
+  String get listPreviewText {
+    if (ttsChunks.isNotEmpty) {
+      final sorted = List<Map<String, dynamic>>.from(ttsChunks)
+        ..sort(
+          (a, b) => ((a['seq'] as num?)?.toInt() ?? 0)
+              .compareTo((b['seq'] as num?)?.toInt() ?? 0),
+        );
+      for (final c in sorted.reversed) {
+        final t = '${c['text'] ?? ''}'.trim();
+        if (t.isNotEmpty) return t;
+      }
+    }
+    return content.trim();
   }
 }
 

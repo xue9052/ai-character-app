@@ -30,7 +30,7 @@ class _PersonaDetailPageState extends State<PersonaDetailPage> {
 
   Future<PersonaDetail> _load() {
     final s = AppStateScope.of(context);
-    return ApiClient(s.baseUrl).getPersona(s.userId, widget.personaId);
+    return AppStateScope.of(context).api().getPersona(s.userId, widget.personaId);
   }
 
   void _reload() => setState(() => _future = _load());
@@ -57,7 +57,7 @@ class _PersonaDetailPageState extends State<PersonaDetailPage> {
     if (ok != true || !mounted) return;
     final s = AppStateScope.of(context);
     try {
-      await ApiClient(s.baseUrl).deletePersona(userId: s.userId, id: p.id);
+      await s.api().deletePersona(userId: s.userId, id: p.id);
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (e) {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_client.dart';
 import '../../api/models.dart';
+import '../../services/chat_local_store.dart';
 import '../../services/app_state.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/time_fmt.dart';
@@ -120,20 +121,34 @@ class _ChatListPageState extends State<ChatListPage> {
     if (!widget.isActive) return;
     final gen = ++_loadGen;
     final s = _state ?? AppStateScope.of(context);
-    if (!silent && mounted) {
+
+    // 本地 DB 首屏（冷启动也能立刻看到聊过的角色）
+    if (!silent || _rows.isEmpty) {
+      try {
+        final local = await ChatLocalStore.instance.listSessions(s.userId);
+        if (gen != _loadGen || !mounted) return;
+        if (local.isNotEmpty) {
+          final localRows = _rowsFromApiMaps(local, s);
+          setState(() {
+            _rows = _mergePreviews(localRows, s);
+            _loading = false;
+            _loadedOnce = true;
+            _error = null;
+          });
+        }
+      } catch (_) {/* ignore */}
+    }
+
+    if (!silent && mounted && _rows.isEmpty) {
       final previewRows = _rowsFromPreviews(s);
       setState(() {
-        if (_rows.isEmpty) {
-          if (previewRows.isNotEmpty) _rows = previewRows;
-          _loading = _rows.isEmpty;
-        } else if (previewRows.isNotEmpty) {
-          _rows = _mergePreviews(_rows, s);
-        }
+        if (previewRows.isNotEmpty) _rows = previewRows;
+        _loading = _rows.isEmpty;
         _error = null;
       });
     }
     try {
-      final api = ApiClient(s.baseUrl);
+      final api = s.api();
       List<Map<String, dynamic>> sessions;
       try {
         sessions = await api.listChatSessions(userId: s.userId, limit: 50);
@@ -142,34 +157,8 @@ class _ChatListPageState extends State<ChatListPage> {
         sessions = await _loadSessionsLegacy(api, s);
       }
       if (gen != _loadGen || !mounted) return;
-      final rows = <_SessionRow>[];
-      for (final item in sessions) {
-        final pid = '${item['persona_id'] ?? ''}'.trim();
-        if (pid.isEmpty) continue;
-        final total = (item['total_messages'] as num?)?.toInt() ?? 0;
-        if (total <= 0 && s.lastPersonaId != pid && s.sessionPreviews[pid] == null) {
-          continue;
-        }
-        rows.add(
-          _SessionRow(
-            persona: PersonaSummary(
-              id: pid,
-              name: '${item['persona_name'] ?? pid}',
-              oneLiner: '${item['one_liner'] ?? ''}',
-              source: '${item['source'] ?? 'custom'}',
-              coverUrl: item['cover_url'] as String?,
-              coverEmoji: item['cover_emoji'] as String?,
-              coverColor: item['cover_color'] as String?,
-            ),
-            preview: '${item['preview'] ?? '暂无消息，点此开始'}',
-            total: total,
-            lastTs: (item['last_ts'] as num?)?.toInt(),
-            stageLabel: '${item['stage_label'] ?? ''}'.trim().isEmpty
-                ? null
-                : '${item['stage_label']}',
-          ),
-        );
-      }
+      await ChatLocalStore.instance.saveSessionsFromApi(s.userId, sessions);
+      final rows = _rowsFromApiMaps(sessions, s);
       final merged = _mergePreviews(rows, s);
       if (gen != _loadGen || !mounted) return;
       setState(() {
@@ -186,6 +175,41 @@ class _ChatListPageState extends State<ChatListPage> {
         if (_rows.isEmpty) _error = '$e';
       });
     }
+  }
+
+  List<_SessionRow> _rowsFromApiMaps(
+    List<Map<String, dynamic>> sessions,
+    AppState s,
+  ) {
+    final rows = <_SessionRow>[];
+    for (final item in sessions) {
+      final pid = '${item['persona_id'] ?? ''}'.trim();
+      if (pid.isEmpty) continue;
+      final total = (item['total_messages'] as num?)?.toInt() ?? 0;
+      if (total <= 0 && s.lastPersonaId != pid && s.sessionPreviews[pid] == null) {
+        continue;
+      }
+      rows.add(
+        _SessionRow(
+          persona: PersonaSummary(
+            id: pid,
+            name: '${item['persona_name'] ?? pid}',
+            oneLiner: '${item['one_liner'] ?? ''}',
+            source: '${item['source'] ?? 'custom'}',
+            coverUrl: item['cover_url'] as String?,
+            coverEmoji: item['cover_emoji'] as String?,
+            coverColor: item['cover_color'] as String?,
+          ),
+          preview: '${item['preview'] ?? '暂无消息，点此开始'}',
+          total: total,
+          lastTs: (item['last_ts'] as num?)?.toInt(),
+          stageLabel: '${item['stage_label'] ?? ''}'.trim().isEmpty
+              ? null
+              : '${item['stage_label']}',
+        ),
+      );
+    }
+    return rows;
   }
 
   List<_SessionRow> _rowsFromPreviews(AppState s) {
@@ -241,7 +265,7 @@ class _ChatListPageState extends State<ChatListPage> {
             Map<String, dynamic>.from(msgs.last as Map),
           );
           final prefix = m.role == 'user' ? '我：' : '';
-          final text = m.content.trim();
+          final text = m.listPreviewText;
           preview = text.isEmpty ? '（新消息）' : '$prefix$text';
           lastTs = m.ts;
         }

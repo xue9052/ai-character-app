@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'chat_local_store.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 
@@ -43,6 +44,7 @@ class AppState extends ChangeNotifier {
   /// 带 401 自动登出的 API 客户端（登录态失效时 AuthGate 会回到登录页）
   ApiClient api() => ApiClient(
         _baseUrl,
+        accessToken: _accessToken,
         onUnauthorized: () async {
           await logout();
         },
@@ -199,8 +201,11 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    final uid = userId;
     _accessToken = null;
     _user = null;
+    _chatBootstrapCache.clear();
+    sessionPreviews.clear();
     final sp = await SharedPreferences.getInstance();
     await sp.remove(_kToken);
     await sp.remove(_kEmail);
@@ -211,6 +216,9 @@ class AppState extends ChangeNotifier {
     await sp.remove(_kAvatarColor);
     await sp.remove(_kAvatarUrl);
     await sp.remove(_kProfileCompleted);
+    if (uid.isNotEmpty) {
+      await ChatLocalStore.instance.clearUser(uid);
+    }
     notifyListeners();
   }
 
@@ -233,6 +241,20 @@ class AppState extends ChangeNotifier {
     final sp = await SharedPreferences.getInstance();
     await sp.setBool(_kAutoTts, v);
     notifyListeners();
+  }
+
+  /// personaId → 最近一次 bootstrap 快照（二次进聊天先秒开再后台刷新）
+  final Map<String, Map<String, dynamic>> _chatBootstrapCache = {};
+
+  Map<String, dynamic>? chatBootstrapCache(String personaId) =>
+      _chatBootstrapCache[personaId];
+
+  void setChatBootstrapCache(String personaId, Map<String, dynamic> data) {
+    _chatBootstrapCache[personaId] = Map<String, dynamic>.from(data);
+  }
+
+  void clearChatBootstrapCache(String personaId) {
+    _chatBootstrapCache.remove(personaId);
   }
 
   Future<void> setLastPersona(String id) async {

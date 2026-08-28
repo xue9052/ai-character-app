@@ -29,7 +29,7 @@ class _PersonaWorkshopPageState extends State<PersonaWorkshopPage> {
 
   Future<List<PersonaSummary>> _fetch() {
     final s = AppStateScope.of(context);
-    return ApiClient(s.baseUrl).listMyPersonas(s.userId);
+    return AppStateScope.of(context).api().listMyPersonas(s.userId);
   }
 
   void _reload() => setState(() => _future = _fetch());
