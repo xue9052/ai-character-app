@@ -2,174 +2,98 @@
 
 name: iOS Build
 
-
-
 on:
-
   push:
-
     branches: [main, master]
-
   pull_request:
-
   workflow_dispatch:
-
     inputs:
-
       build_signed_ipa:
-
         description: "打签名 ipa（须先配 IOS_* Secrets 与 ExportOptions.plist）"
-
         required: false
-
         default: false
-
         type: boolean
 
-
-
 concurrency:
-
   group: ios-build-${{ github.ref }}
-
   cancel-in-progress: true
 
-
-
 jobs:
-
   compile:
-
     name: Compile (no codesign)
-
     runs-on: macos-latest
-
     steps:
-
       - uses: actions/checkout@v4
 
-
-
       - uses: subosito/flutter-action@v2
-
         with:
-
           channel: stable
-
           cache: true
 
-
-
       - run: flutter pub get
-
       - run: flutter build ios --release --no-codesign
 
-
-
   ipa:
-
     name: Signed IPA
-
     needs: compile
-
     if: github.event_name == 'workflow_dispatch' && inputs.build_signed_ipa == true
-
     runs-on: macos-latest
-
     steps:
-
       - uses: actions/checkout@v4
 
-
-
       - uses: subosito/flutter-action@v2
-
         with:
-
           channel: stable
-
           cache: true
-
-
 
       - run: flutter pub get
 
-
-
       - name: Import signing files
-
         env:
-
           IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
-
           IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
-
           IOS_PROFILE_BASE64: ${{ secrets.IOS_PROFILE_BASE64 }}
-
           KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
-
         run: |
-
           if [ -z "$IOS_P12_BASE64" ]; then
-
             echo "::error::未配置 IOS_P12_BASE64。请到 Settings → Secrets → Actions 添加证书。"
-
             exit 1
-
           fi
-
           if [ -z "$IOS_P12_PASSWORD" ]; then
-
             echo "::error::未配置 IOS_P12_PASSWORD"
-
             exit 1
-
           fi
-
           if [ -z "$IOS_PROFILE_BASE64" ]; then
-
             echo "::error::未配置 IOS_PROFILE_BASE64"
-
             exit 1
-
           fi
-
           KC_PASS="${KEYCHAIN_PASSWORD:-ci-temp-pass}"
-
           KEYCHAIN=build.keychain
-
           security create-keychain -p "$KC_PASS" "$KEYCHAIN"
-
           security default-keychain -s "$KEYCHAIN"
-
           security unlock-keychain -p "$KC_PASS" "$KEYCHAIN"
-
           security set-keychain-settings -t 3600 -u "$KEYCHAIN"
-
           echo "$IOS_P12_BASE64" | base64 --decode > certificate.p12
-
           security import certificate.p12 -k "$KEYCHAIN" -P "$IOS_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" "$KEYCHAIN"
-
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-
           echo "$IOS_PROFILE_BASE64" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
-
-
 
       - run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
 
-
-
       - uses: actions/upload-artifact@v4
-
         with:
-
           name: ios-ipa
-
           path: build/ios/ipa/*.ipa
-
           if-no-files-found: error
 
-
+      - name: Upload to PGYER
+        env:
+          PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+        run: |
+          if [ -z "$PGYER_API_KEY" ]; then
+            echo "::warning::未配置 PGYER_API_KEY，跳过蒲公英上传"
+            exit 0
+          fi
+          IPA=$(ls build/ios/ipa/*.ipa | head -1)
+          python3 scripts/pgyer_upload.py "$IPA" ios
