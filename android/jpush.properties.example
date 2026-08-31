@@ -1,0 +1,2 @@
+# 复制为 jpush.properties 并填入极光 AppKey（勿提交真实 key）
+JPUSH_APPKEY=

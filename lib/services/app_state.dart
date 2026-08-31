@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'chat_local_store.dart';
+import 'push_service.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 
@@ -14,6 +15,7 @@ class AppState extends ChangeNotifier {
     required String baseUrl,
     required this.useStream,
     required this.autoTts,
+    required this.pushReminders,
     this.lastPersonaId,
     String? accessToken,
     AuthUser? user,
@@ -28,6 +30,8 @@ class AppState extends ChangeNotifier {
   AuthUser? _user;
   bool useStream;
   bool autoTts;
+  /// 主动关怀推送提醒（极光 JPush；默认关）
+  bool pushReminders;
   String? lastPersonaId;
   /// 私聊有更新时递增，聊天列表监听后刷新预览
   int chatListVersion = 0;
@@ -101,6 +105,7 @@ class AppState extends ChangeNotifier {
   static const _kBase = 'api_base';
   static const _kStream = 'use_stream';
   static const _kAutoTts = 'auto_tts';
+  static const _kPushReminders = 'push_reminders';
   static const _kPersona = 'last_persona_id';
   static const _kToken = 'access_token';
   static const _kNickname = 'nickname';
@@ -146,6 +151,7 @@ class AppState extends ChangeNotifier {
       baseUrl: base,
       useStream: sp.getBool(_kStream) ?? !kIsWeb,
       autoTts: sp.getBool(_kAutoTts) ?? true,
+      pushReminders: sp.getBool(_kPushReminders) ?? false,
       lastPersonaId: sp.getString(_kPersona),
       accessToken: token,
       user: cachedUser,
@@ -155,6 +161,7 @@ class AppState extends ChangeNotifier {
       try {
         final me = await state.api().me(token!);
         await state.applySession(AuthSession(accessToken: token, user: me));
+        await state.syncPush();
       } catch (_) {
         // 过期 / 无效令牌：清会话，交给 AuthGate 回登录
         await state.logout();
@@ -193,6 +200,7 @@ class AppState extends ChangeNotifier {
     await sp.setString(_kAvatarUrl, session.user.avatarUrl);
     await sp.setBool(_kProfileCompleted, session.user.profileCompleted);
     notifyListeners();
+    await syncPush();
   }
 
   Future<void> applyUser(AuthUser user) async {
@@ -202,6 +210,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> logout() async {
     final uid = userId;
+    await PushService.instance.onLogout(api: isLoggedIn ? api() : null, userId: uid);
     _accessToken = null;
     _user = null;
     _chatBootstrapCache.clear();
@@ -241,6 +250,23 @@ class AppState extends ChangeNotifier {
     final sp = await SharedPreferences.getInstance();
     await sp.setBool(_kAutoTts, v);
     notifyListeners();
+  }
+
+  Future<void> setPushReminders(bool v) async {
+    pushReminders = v;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(_kPushReminders, v);
+    notifyListeners();
+    await syncPush();
+  }
+
+  Future<void> syncPush() async {
+    if (!isLoggedIn) return;
+    await PushService.instance.syncAfterLogin(
+      api: api(),
+      userId: userId,
+      remindersEnabled: pushReminders,
+    );
   }
 
   /// personaId → 最近一次 bootstrap 快照（二次进聊天先秒开再后台刷新）

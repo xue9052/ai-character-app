@@ -5,6 +5,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+import java.util.Properties
+
 android {
     namespace = "com.aichar.ai_character_app"
     compileSdk = 37
@@ -21,6 +23,22 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        val jpushProps = Properties()
+        val jpushFile = rootProject.file("jpush.properties")
+        if (jpushFile.exists()) {
+            jpushProps.load(jpushFile.inputStream())
+        }
+        val jpushAppKey = (
+            jpushProps.getProperty("JPUSH_APPKEY", "").trim().ifEmpty {
+                System.getenv("JPUSH_APPKEY")?.trim().orEmpty()
+            }
+        )
+        if (jpushAppKey.isEmpty()) {
+            println("WARN: JPUSH_APPKEY 为空，请配置 android/jpush.properties 或环境变量 JPUSH_APPKEY")
+        }
+        manifestPlaceholders["JPUSH_PKGNAME"] = applicationId!!
+        manifestPlaceholders["JPUSH_APPKEY"] = jpushAppKey
+        manifestPlaceholders["JPUSH_CHANNEL"] = "ai-character"
     }
 
     buildTypes {

@@ -803,6 +803,69 @@ class ApiClient {
     );
   }
 
+  Future<Map<String, dynamic>> pushConfig() async {
+    final res = await http.get(_u('/v1/app/push-config'));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '拉取推送配置失败');
+    }
+    return data;
+  }
+
+  Future<void> registerPushDevice({
+    required String userId,
+    required String platform,
+    required String registrationId,
+    String appVersion = '',
+    bool enabled = true,
+  }) async {
+    final res = await http.post(
+      _u('/v1/users/${Uri.encodeComponent(userId)}/push/register'),
+      headers: _headers(json: true),
+      body: jsonEncode({
+        'platform': platform,
+        'registration_id': registrationId,
+        'app_version': appVersion,
+        'enabled': enabled,
+      }),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '注册推送设备失败');
+    }
+  }
+
+  Future<void> revokePushDevice({
+    required String userId,
+    required String platform,
+    required String registrationId,
+  }) async {
+    final res = await http.post(
+      _u('/v1/users/${Uri.encodeComponent(userId)}/push/revoke'),
+      headers: _headers(json: true),
+      body: jsonEncode({
+        'platform': platform,
+        'registration_id': registrationId,
+      }),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '注销推送设备失败');
+    }
+  }
+
+  Future<Map<String, dynamic>> testPush({required String userId}) async {
+    final res = await http.post(
+      _u('/v1/users/${Uri.encodeComponent(userId)}/push/test'),
+      headers: _headers(json: true),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '测试推送失败');
+    }
+    return data;
+  }
+
   Future<Map<String, dynamic>> health() async {
     final res = await http.get(_u('/health'));
     return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;

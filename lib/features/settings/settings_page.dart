@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -5,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../../api/api_exception.dart';
 import '../../services/app_state.dart';
 import '../../services/dev_flags.dart';
+import '../../services/push_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/user_avatar.dart';
 import '../personas/persona_workshop_page.dart';
@@ -194,6 +197,57 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
             const Divider(height: 28),
+            if (!kIsWeb && PushService.supported)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('主动关怀推送'),
+                subtitle: Text(
+                  Platform.isIOS
+                      ? 'iOS 系统通知提醒（极光推送；默认关）'
+                      : 'Android 系统通知栏提醒（极光推送；默认关）',
+                ),
+                value: s.pushReminders,
+                onChanged: (v) async {
+                  await s.setPushReminders(v);
+                  if (!mounted) return;
+                  setState(() {});
+                  if (v && !PushService.instance.serverEnabled) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('服务端尚未启用推送，请稍后再试'),
+                      ),
+                    );
+                  } else if (v &&
+                      PushService.instance.registrationId == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('正在注册推送，请稍候…'),
+                      ),
+                    );
+                  }
+                },
+              ),
+            if (!kIsWeb && PushService.supported && s.pushReminders)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('发送测试推送'),
+                subtitle: const Text('确认通知栏能否收到'),
+                trailing: const Icon(Icons.notifications_active_outlined),
+                onTap: () async {
+                  try {
+                    await s.api().testPush(userId: s.userId);
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('已发送，请看通知栏')),
+                    );
+                  } catch (e) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(apiErrorMessage(e))),
+                    );
+                  }
+                },
+              ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('自动朗读回复'),

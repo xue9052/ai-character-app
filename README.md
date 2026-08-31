@@ -26,8 +26,14 @@ flutter build apk --debug
 | **Android APK** | push / 手动 | Linux runner，产出 debug apk |
 | **iOS Build** | push / 手动 | macOS runner；签名 ipa 需配置 Secrets |
 
-iOS 签名 Secrets：`IOS_P12_BASE64`、`IOS_P12_PASSWORD`、`IOS_PROFILE_BASE64`（可选 `IOS_KEYCHAIN_PASSWORD`）。  
-导出配置见 `ios/ExportOptions.plist`（需填 Team ID 与描述文件名称）。
+iOS 签名与推送详见 [docs/iOS-build-and-push.md](docs/iOS-build-and-push.md)。
+
+`ios/ExportOptions.plist` 已配置 Ad Hoc（Team `3B5Z385689`，profile `CharacterApp`）。
+
+## 推送
+
+- 设置 → **主动关怀推送**（Android / iOS，极光 JPush）
+- Android：复制 `android/jpush.properties.example` 为 `jpush.properties` 并填入 AppKey
 
 ## 后端
 
