@@ -24,18 +24,22 @@ mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
 cp "$PP" "$HOME/Library/MobileDevice/Provisioning Profiles/${UUID}.mobileprovision"
 echo "Installed profile UUID=${UUID}"
 
-mapfile -t IDENTITIES < <(
+IDENTITY=""
+while IFS= read -r line; do
+  id=$(echo "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[A-F0-9]+[[:space:]]+"([^"]+)".*/\1/')
+  if [[ -n "$id" ]]; then
+    IDENTITY="$id"
+    break
+  fi
+done < <(
   security find-identity -v -p codesigning "$KEYCHAIN" |
-    grep -E 'Apple (Distribution|Development)|iPhone (Distribution|Developer)' |
-    sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[A-F0-9]+[[:space:]]+"([^"]+)".*/\1/' ||
-    true
+    grep -E 'Apple (Distribution|Development)|iPhone (Distribution|Developer)' || true
 )
-if [[ ${#IDENTITIES[@]} -eq 0 ]]; then
+if [[ -z "$IDENTITY" ]]; then
   echo "No codesign identity found in $KEYCHAIN"
   security find-identity -v -p codesigning "$KEYCHAIN" || true
   exit 1
 fi
-IDENTITY="${IDENTITIES[0]}"
 echo "Using CODE_SIGN_IDENTITY=${IDENTITY}"
 
 python3 - <<PY
