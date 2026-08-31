@@ -79,6 +79,11 @@ jobs:
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           echo "$IOS_PROFILE_BASE64" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
 
+      - name: Configure Xcode manual signing
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+        run: bash scripts/ios_ci_signing.sh
+
       - run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
 
       - uses: actions/upload-artifact@v4
