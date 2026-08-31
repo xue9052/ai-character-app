@@ -26,15 +26,16 @@ echo "Installed profile UUID=${UUID}"
 
 IDENTITY=""
 while IFS= read -r line; do
-  id=$(echo "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[A-F0-9]+[[:space:]]+"([^"]+)".*/\1/')
-  if [[ -n "$id" ]]; then
-    IDENTITY="$id"
-    break
-  fi
-done < <(
-  security find-identity -v -p codesigning "$KEYCHAIN" |
-    grep -E 'Apple (Distribution|Development)|iPhone (Distribution|Developer)' || true
-)
+  case "$line" in
+    *Apple\ Distribution*|*Apple\ Development*|*iPhone\ Distribution*|*iPhone\ Developer*)
+      id=$(echo "$line" | awk -F'"' '{print $2}')
+      if [[ -n "$id" ]]; then
+        IDENTITY="$id"
+        break
+      fi
+      ;;
+  esac
+done < <(security find-identity -v -p codesigning "$KEYCHAIN" || true)
 if [[ -z "$IDENTITY" ]]; then
   echo "No codesign identity found in $KEYCHAIN"
   security find-identity -v -p codesigning "$KEYCHAIN" || true
@@ -42,15 +43,21 @@ if [[ -z "$IDENTITY" ]]; then
 fi
 echo "Using CODE_SIGN_IDENTITY=${IDENTITY}"
 
-python3 - <<PY
+export IOS_CI_IDENTITY="$IDENTITY"
+export IOS_CI_TEAM_ID="$TEAM_ID"
+export IOS_CI_PROFILE_NAME="$PROFILE_NAME"
+export IOS_CI_PBX="$PBX"
+
+python3 - <<'PY'
+import os
 import re
 from pathlib import Path
 
-pbx_path = Path("${PBX}")
+pbx_path = Path(os.environ["IOS_CI_PBX"])
 text = pbx_path.read_text(encoding="utf-8")
-team = "${TEAM_ID}"
-profile = "${PROFILE_NAME}"
-identity = """${IDENTITY}"""
+team = os.environ["IOS_CI_TEAM_ID"]
+profile = os.environ["IOS_CI_PROFILE_NAME"]
+identity = os.environ["IOS_CI_IDENTITY"]
 
 
 def patch_block(block: str) -> str:
