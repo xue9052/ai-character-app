@@ -93,6 +93,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload to PGYER
+        continue-on-error: true
         env:
           PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
         run: |
