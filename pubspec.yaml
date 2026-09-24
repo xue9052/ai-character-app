@@ -42,6 +42,7 @@ flutter:
   assets:
     - assets/images/login_bg.png
     - assets/images/soulora_logo.png
+    - assets/images/look_styles/
     # 陪伴视频素材暂时不打包（约 19MB）；恢复场景视频试玩时一并放回
     # - assets/scenes/loop_11.mp4
     # - assets/scenes/loop_22.mp4

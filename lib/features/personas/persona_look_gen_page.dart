@@ -365,6 +365,16 @@ class _PersonaLookGenPageState extends State<PersonaLookGenPage> {
 }
 
 class _StyleCard extends StatelessWidget {
+  static const _previewAssets = <String, String>{
+    'manga_ii': 'assets/images/look_styles/manga_ii.png',
+    'protagonist': 'assets/images/look_styles/protagonist.png',
+    'nature': 'assets/images/look_styles/nature.png',
+    'classic': 'assets/images/look_styles/classic.png',
+    'manga': 'assets/images/look_styles/manga.png',
+    'yunmeng': 'assets/images/look_styles/yunmeng.png',
+    'chibi': 'assets/images/look_styles/chibi.png',
+    'photo': 'assets/images/look_styles/photo.png',
+  };
   const _StyleCard({
     required this.style,
     required this.selected,
@@ -403,7 +413,13 @@ class _StyleCard extends StatelessWidget {
                 ),
               ),
               child: Stack(
+                fit: StackFit.expand,
                 children: [
+                  if (_previewAssets[style.key] case final preview?)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.asset(preview, fit: BoxFit.cover),
+                    ),
                   if (style.badge.isNotEmpty)
                     Positioned(
                       top: 6,

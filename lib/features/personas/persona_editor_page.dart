@@ -1184,66 +1184,81 @@ class _VisibilityPick extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: selected
-          ? AppColors.primary.withValues(alpha: 0.18)
-          : Colors.white.withValues(alpha: 0.04),
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        onTap: onTap,
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: Material(
+        color: Colors.transparent,
         borderRadius: BorderRadius.circular(14),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(14),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+            decoration: BoxDecoration(
               color: selected
-                  ? AppColors.primaryLight
-                  : Colors.white.withValues(alpha: 0.08),
-              width: selected ? 1.6 : 1,
-            ),
-            boxShadow: selected
-                ? [
-                    BoxShadow(
-                      color: AppColors.primary.withValues(alpha: 0.35),
-                      blurRadius: 12,
-                    ),
-                  ]
-                : null,
-          ),
-          child: Column(
-            children: [
-              Icon(
-                icon,
+                  ? const Color(0xFF292832)
+                  : Colors.white.withValues(alpha: 0.035),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
                 color: selected
-                    ? AppColors.primaryLight
-                    : Colors.white.withValues(alpha: 0.45),
+                    ? Colors.white.withValues(alpha: 0.48)
+                    : Colors.white.withValues(alpha: 0.10),
+                width: selected ? 1.4 : 1,
               ),
-              const SizedBox(height: 6),
-              Text(
-                title,
-                style: TextStyle(
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  icon,
+                  size: 21,
                   color: selected
                       ? Colors.white
                       : Colors.white.withValues(alpha: 0.55),
-                  fontWeight: FontWeight.w700,
                 ),
-              ),
-              Text(
-                subtitle,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.white.withValues(alpha: 0.4),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          color: selected
+                              ? Colors.white
+                              : Colors.white.withValues(alpha: 0.72),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.46),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+                if (selected) ...[
+                  const SizedBox(width: 3),
+                  const Icon(Icons.check_circle_rounded,
+                      size: 17, color: AppColors.accentCyan),
+                ],
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 }
-
 class _CreateGradientButton extends StatelessWidget {
   const _CreateGradientButton({required this.onPressed, required this.child});
 
@@ -1389,7 +1404,7 @@ class _AppearanceBlock extends StatelessWidget {
         final networkUrl = lookBytes == null
             ? resolvePersonaBackgroundUrl(baseUrl, existingLookUrl)
             : null;
-        final coverPreviewUrl = lookBytes == null && networkUrl == null
+        final coverPreviewUrl = lookBytes == null
             ? resolvePersonaCoverUrl(baseUrl, previewCoverUrl)
             : null;
         final hasImage = lookBytes != null || networkUrl != null;
@@ -1427,7 +1442,7 @@ class _AppearanceBlock extends StatelessWidget {
                                     painter: _CenterSquareGuidePainter(),
                                   ),
                                 ),
-                                if (avatarBytes != null)
+                                if (avatarBytes != null || coverPreviewUrl != null)
                                   Positioned(
                                     right: 12,
                                     top: 12,
@@ -1448,10 +1463,15 @@ class _AppearanceBlock extends StatelessWidget {
                                         ],
                                       ),
                                       clipBehavior: Clip.antiAlias,
-                                      child: Image.memory(
-                                        avatarBytes!,
-                                        fit: BoxFit.cover,
-                                      ),
+                                      child: avatarBytes != null
+                                          ? Image.memory(
+                                              avatarBytes!,
+                                              fit: BoxFit.cover,
+                                            )
+                                          : AppNetworkImage(
+                                              url: coverPreviewUrl!,
+                                              fit: BoxFit.cover,
+                                            ),
                                     ),
                                   ),
                                 Positioned(
