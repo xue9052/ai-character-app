@@ -6,6 +6,7 @@ import '../../api/api_exception.dart';
 import '../../api/models.dart';
 import '../../services/app_state.dart';
 import '../../theme/app_theme.dart';
+import '../../theme/app_widgets.dart';
 import 'persona_cover.dart';
 
 /// 对齐「创建形象」页：画风分类 + 描述 + 生成（走后端 image_gen）
@@ -341,36 +342,19 @@ class _PersonaLookGenPageState extends State<PersonaLookGenPage> {
                     top: false,
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                      child: SizedBox(
-                        width: double.infinity,
-                        height: 50,
-                        child: FilledButton(
+                      child: FrostButton(
                           onPressed: _generating ? null : _generate,
-                          style: FilledButton.styleFrom(
-                            backgroundColor: _accent,
-                            foregroundColor: Colors.black,
-                            disabledBackgroundColor:
-                                _accent.withValues(alpha: 0.45),
-                            shape: const StadiumBorder(),
-                          ),
                           child: _generating
                               ? const SizedBox(
                                   width: 22,
                                   height: 22,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2.4,
-                                    color: Colors.black87,
+                                    color: AppColors.textPrimary,
                                   ),
                                 )
-                              : const Text(
-                                  '生成形象',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 16,
-                                  ),
-                                ),
+                              : const Text('生成形象'),
                         ),
-                      ),
                     ),
                   ),
                 ],

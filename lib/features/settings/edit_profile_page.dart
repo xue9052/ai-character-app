@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../api/api_exception.dart';
 import '../../api/models.dart';
 import '../../services/app_state.dart';
+import '../../theme/app_widgets.dart';
 import '../../widgets/user_avatar.dart';
 
 class EditProfilePage extends StatefulWidget {
@@ -45,17 +46,17 @@ class _EditProfilePageState extends State<EditProfilePage> {
   }
 
   Future<void> _bootstrap() async {
-    final s = AppStateScope.of(context);
-    final u = s.user;
-    if (u != null) {
-      _nickCtrl.text = u.nickname;
-      _bioCtrl.text = u.bio;
-      _avatarKey = u.avatarKey;
-      _avatarEmoji = u.avatarEmoji;
-      _avatarColor = u.avatarColor;
-      _avatarUrl = u.avatarUrl;
-    }
     try {
+      final s = AppStateScope.of(context);
+      final u = s.user;
+      if (u != null) {
+        _nickCtrl.text = u.nickname;
+        _bioCtrl.text = u.bio;
+        _avatarKey = u.avatarKey;
+        _avatarEmoji = u.avatarEmoji;
+        _avatarColor = u.avatarColor;
+        _avatarUrl = u.avatarUrl;
+      }
       final presets = await s.api().avatarPresets();
       if (!mounted) return;
       setState(() {
@@ -65,14 +66,13 @@ class _EditProfilePageState extends State<EditProfilePage> {
           _avatarEmoji = presets.first.emoji;
           _avatarColor = presets.first.color;
         }
-        _loading = false;
+        _error = null;
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _error = '$e';
-        _loading = false;
-      });
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -120,7 +120,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
     }
     setState(() => _saving = true);
     try {
-      final AuthUser user;
+      AuthUser user;
       if (_pendingBytes != null) {
         await s.api().uploadAvatar(
           accessToken: token,
@@ -145,11 +145,33 @@ class _EditProfilePageState extends State<EditProfilePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('资料已保存')),
       );
-      if (widget.fromRegister) {
-        Navigator.of(context).popUntil((r) => r.isFirst);
-      } else {
+      if (!widget.fromRegister) {
         Navigator.of(context).pop(true);
       }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(apiErrorMessage(e))),
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _skip() async {
+    final s = AppStateScope.of(context);
+    final token = s.accessToken;
+    if (token == null) return;
+    setState(() => _saving = true);
+    try {
+      final nick = _nickCtrl.text.trim();
+      final user = await s.api().updateMe(
+        accessToken: token,
+        nickname: nick.isEmpty ? (s.user?.nickname ?? '') : nick,
+        avatarKey: _avatarKey,
+        bio: _bioCtrl.text.trim(),
+      );
+      await s.applyUser(user);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -273,16 +295,14 @@ class _EditProfilePageState extends State<EditProfilePage> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                FilledButton(
+                FrostButton(
                   onPressed: _saving ? null : _save,
                   child: Text(_saving ? '保存中…' : '保存'),
                 ),
                 if (widget.fromRegister) ...[
                   const SizedBox(height: 8),
                   TextButton(
-                    onPressed: _saving
-                        ? null
-                        : () => Navigator.of(context).popUntil((r) => r.isFirst),
+                    onPressed: _saving ? null : _skip,
                     child: const Text('暂时跳过'),
                   ),
                 ],

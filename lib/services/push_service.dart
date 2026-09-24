@@ -18,6 +18,7 @@ class PushService {
   bool _inited = false;
   String? _registrationId;
   bool _serverEnabled = false;
+  void Function(String groupId)? onGroupPush;
 
   String? get registrationId => _registrationId;
   bool get serverEnabled => _serverEnabled;
@@ -27,8 +28,30 @@ class PushService {
 
   String get _platform => Platform.isIOS ? 'ios' : 'android';
 
-  Future<bool> _ensureAndroidNotifyPermission() async {
-    if (!Platform.isAndroid) return true;
+  void _handleExtras(Map<dynamic, dynamic> event) {
+    final extras = event['extras'];
+    Map<String, dynamic>? map;
+    if (extras is Map) {
+      final android = extras['android'];
+      final ios = extras['ios'];
+      if (android is Map) {
+        map = Map<String, dynamic>.from(android);
+      } else if (ios is Map) {
+        map = Map<String, dynamic>.from(ios);
+      } else {
+        map = Map<String, dynamic>.from(extras);
+      }
+    }
+    final type = '${map?['type'] ?? ''}';
+    if (type == 'group_message') {
+      final gid = '${map?['group_id'] ?? ''}'.trim();
+      if (gid.isNotEmpty) {
+        onGroupPush?.call(gid);
+      }
+    }
+  }
+
+  Future<bool> _ensureNotifyPermission() async {
     final status = await Permission.notification.status;
     if (status.isGranted) return true;
     final req = await Permission.notification.request();
@@ -51,10 +74,29 @@ class PushService {
   }) async {
     if (!supported) return;
     try {
-      final cfg = await api.pushConfig();
+      final cfg = await api
+          .pushConfig()
+          .timeout(const Duration(seconds: 10), onTimeout: () => <String, dynamic>{});
       _serverEnabled = cfg['jpush_enabled'] == true;
       final appKey = '${cfg['jpush_app_key'] ?? ''}'.trim();
       if (!_serverEnabled || appKey.isEmpty) return;
+
+      // 未开启提醒时不要初始化 JPush，避免注册/登录卡在原生 SDK。
+      if (!remindersEnabled) {
+        if (_inited) {
+          await _jpush
+              .stopPush()
+              .timeout(const Duration(seconds: 5), onTimeout: () {});
+          if (_registrationId != null && _registrationId!.isNotEmpty) {
+            await api.revokePushDevice(
+              userId: userId,
+              platform: _platform,
+              registrationId: _registrationId!,
+            );
+          }
+        }
+        return;
+      }
 
       final iosProduction = cfg['jpush_ios_production'] == true;
 
@@ -62,9 +104,11 @@ class PushService {
         _jpush.addEventHandler(
           onReceiveNotification: (event) async {
             debugPrint('[jpush] receive: $event');
+            _handleExtras(event);
           },
           onOpenNotification: (event) async {
             debugPrint('[jpush] open: $event');
+            _handleExtras(event);
           },
         );
         _jpush.setup(
@@ -85,19 +129,7 @@ class PushService {
         _inited = true;
       }
 
-      if (!remindersEnabled) {
-        await _jpush.stopPush();
-        if (_registrationId != null && _registrationId!.isNotEmpty) {
-          await api.revokePushDevice(
-            userId: userId,
-            platform: _platform,
-            registrationId: _registrationId!,
-          );
-        }
-        return;
-      }
-
-      final granted = await _ensureAndroidNotifyPermission();
+      final granted = await _ensureNotifyPermission();
       if (!granted) {
         debugPrint('[jpush] notification permission denied');
         return;

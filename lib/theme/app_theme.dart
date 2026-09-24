@@ -1,31 +1,50 @@
 import 'package:flutter/material.dart';
 
-/// 温暖沉浸 AI 陪伴主题色
+/// 全站主题：跟聊天页同一套浅白 / 烟灰毛玻璃，不再用紫色填色。
+abstract final class AppBrand {
+  static const name = 'Soulora';
+  static const tagline = '你的专属陪伴';
+  static const logoAsset = 'assets/images/soulora_logo.png';
+}
+
 abstract final class AppColors {
-  static const primary = Color(0xFF7B6CF6);
-  static const primaryLight = Color(0xFFA78BFA);
+  static const glassLight = Color(0x8FFFFFFF);
+  static const glassSoft = Color(0x40FFFFFF);
+  static const glassSmoke = Color(0x73383840);
+  static const strokeStrong = Color(0x85FFFFFF);
+  static const strokeSoft = Color(0x2EFFFFFF);
+
+  static const bgDark = Color(0xFF0E0E14);
+  static const bgDarkElevated = Color(0xFF1C1C22);
+  static const bgLight = Color(0xFFF4F4F6);
+
+  static const textPrimary = Color(0xFFFFFFFF);
+  static const textSecondary = Color(0xB8FFFFFF);
+  static const textMuted = Color(0x73FFFFFF);
+
+  /// 兼容旧引用：不再当品牌紫，只当浅白点缀。
+  static const primary = Color(0xFFFFFFFF);
+  static const primaryLight = Color(0xE6FFFFFF);
+
   static const accentPink = Color(0xFFFF8A9B);
   static const accentCyan = Color(0xFF5CE1E6);
-  static const bgLight = Color(0xFFF8F5FF);
-  static const bgDark = Color(0xFF1A1A2E);
-  static const bgDarkElevated = Color(0xFF22223A);
-  static const textPrimary = Color(0xFF2D2A3E);
-  static const textSecondary = Color(0xFF8A8699);
   static const success = Color(0xFF4ADE80);
   static const warning = Color(0xFFFB923C);
 
-  static const radiusCard = 20.0;
-  static const radiusButton = 14.0;
-  static const radiusBubble = 18.0;
+  static const radiusCard = 24.0;
+  static const radiusButton = 28.0;
+  static const radiusBubble = 24.0;
+  static const radiusPill = 30.0;
+  static const iconButtonSize = 40.0;
 
   static const primaryGradient = LinearGradient(
-    colors: [primary, primaryLight],
-    begin: Alignment.centerLeft,
-    end: Alignment.centerRight,
+    colors: [Color(0x8FFFFFFF), Color(0x59FFFFFF)],
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
   );
 
   static const bondGradient = LinearGradient(
-    colors: [accentPink, primary],
+    colors: [accentPink, Color(0xFFFFB4C0)],
     begin: Alignment.centerLeft,
     end: Alignment.centerRight,
   );
@@ -34,16 +53,26 @@ abstract final class AppColors {
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
     colors: [
-      Color(0xFF2A2548),
+      Color(0xFF16161C),
       bgDark,
-      Color(0xFF12121F),
+      Color(0xFF0A0A0E),
     ],
+  );
+}
+
+OutlineInputBorder _frostBorder({Color? color, double width = 1.2}) {
+  return OutlineInputBorder(
+    borderRadius: BorderRadius.circular(AppColors.radiusPill),
+    borderSide: BorderSide(
+      color: color ?? AppColors.strokeSoft,
+      width: width,
+    ),
   );
 }
 
 ThemeData buildAppDarkTheme() {
   final base = ColorScheme.fromSeed(
-    seedColor: AppColors.primary,
+    seedColor: const Color(0xFFB8B8C0),
     brightness: Brightness.dark,
   );
   return ThemeData(
@@ -54,7 +83,7 @@ ThemeData buildAppDarkTheme() {
       secondary: AppColors.accentPink,
       tertiary: AppColors.accentCyan,
       surface: AppColors.bgDarkElevated,
-      onSurface: Colors.white,
+      onSurface: AppColors.textPrimary,
       onSurfaceVariant: AppColors.textSecondary,
       error: AppColors.warning,
     ),
@@ -63,139 +92,135 @@ ThemeData buildAppDarkTheme() {
       backgroundColor: Colors.transparent,
       elevation: 0,
       centerTitle: false,
-      foregroundColor: Colors.white,
+      foregroundColor: AppColors.textPrimary,
+      titleTextStyle: TextStyle(
+        color: AppColors.textPrimary,
+        fontSize: 18,
+        fontWeight: FontWeight.w700,
+      ),
     ),
     cardTheme: CardThemeData(
-      color: Colors.white.withValues(alpha: 0.06),
+      color: AppColors.glassSmoke,
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppColors.radiusCard),
+        side: const BorderSide(color: AppColors.strokeSoft),
       ),
     ),
     chipTheme: ChipThemeData(
-      backgroundColor: Colors.white.withValues(alpha: 0.06),
-      selectedColor: AppColors.primary.withValues(alpha: 0.35),
-      labelStyle: const TextStyle(color: Colors.white),
-      secondaryLabelStyle: const TextStyle(color: Colors.white),
-      side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+      backgroundColor: AppColors.glassSmoke,
+      selectedColor: AppColors.glassLight,
+      labelStyle: const TextStyle(color: AppColors.textPrimary),
+      secondaryLabelStyle: const TextStyle(color: AppColors.textPrimary),
+      side: const BorderSide(color: AppColors.strokeSoft),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: Colors.white.withValues(alpha: 0.06),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.primary, width: 1.4),
-      ),
-      labelStyle: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
-      hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.35)),
+      fillColor: AppColors.glassSoft,
+      border: _frostBorder(),
+      enabledBorder: _frostBorder(),
+      focusedBorder: _frostBorder(color: AppColors.strokeStrong, width: 1.4),
+      labelStyle: const TextStyle(color: AppColors.textSecondary),
+      hintStyle: const TextStyle(color: AppColors.textMuted),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
+        backgroundColor: AppColors.glassLight,
+        foregroundColor: AppColors.textPrimary,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppColors.radiusButton),
         ),
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
       ),
     ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        foregroundColor: AppColors.textPrimary,
+        side: const BorderSide(color: AppColors.strokeStrong),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppColors.radiusButton),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
+    ),
     floatingActionButtonTheme: const FloatingActionButtonThemeData(
-      backgroundColor: AppColors.primary,
-      foregroundColor: Colors.white,
+      backgroundColor: AppColors.glassLight,
+      foregroundColor: AppColors.textPrimary,
     ),
     navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: const Color(0xFF151528),
-      indicatorColor: AppColors.primary.withValues(alpha: 0.25),
+      backgroundColor: const Color(0xCC101014),
+      indicatorColor: AppColors.glassSoft,
       labelTextStyle: WidgetStateProperty.resolveWith((states) {
         final selected = states.contains(WidgetState.selected);
         return TextStyle(
           fontSize: 12,
           fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-          color: selected ? AppColors.primaryLight : AppColors.textSecondary,
+          color: selected ? AppColors.textPrimary : AppColors.textMuted,
         );
       }),
       iconTheme: WidgetStateProperty.resolveWith((states) {
         final selected = states.contains(WidgetState.selected);
         return IconThemeData(
-          color: selected ? AppColors.primaryLight : AppColors.textSecondary,
+          color: selected ? AppColors.textPrimary : AppColors.textMuted,
         );
       }),
     ),
     progressIndicatorTheme: const ProgressIndicatorThemeData(
-      color: AppColors.primary,
+      color: AppColors.textPrimary,
     ),
-    dividerTheme: DividerThemeData(
-      color: Colors.white.withValues(alpha: 0.06),
+    dividerTheme: const DividerThemeData(color: AppColors.strokeSoft),
+    iconTheme: const IconThemeData(color: AppColors.textPrimary),
+    listTileTheme: const ListTileThemeData(
+      iconColor: AppColors.textSecondary,
+      textColor: AppColors.textPrimary,
     ),
   );
 }
 
 ThemeData buildAppLightTheme() {
   final base = ColorScheme.fromSeed(
-    seedColor: AppColors.primary,
+    seedColor: const Color(0xFFB8B8C0),
     brightness: Brightness.light,
   );
   return ThemeData(
     useMaterial3: true,
     brightness: Brightness.light,
     colorScheme: base.copyWith(
-      primary: AppColors.primary,
+      primary: const Color(0xFF2A2A30),
       secondary: AppColors.accentPink,
       tertiary: AppColors.accentCyan,
       surface: Colors.white,
-      onSurface: AppColors.textPrimary,
-      onSurfaceVariant: AppColors.textSecondary,
+      onSurface: const Color(0xFF1A1A1E),
+      onSurfaceVariant: const Color(0xFF6A6A74),
     ),
     scaffoldBackgroundColor: AppColors.bgLight,
     appBarTheme: const AppBarTheme(
       backgroundColor: Colors.transparent,
       elevation: 0,
-      foregroundColor: AppColors.textPrimary,
+      foregroundColor: Color(0xFF1A1A1E),
     ),
     cardTheme: CardThemeData(
       color: Colors.white,
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppColors.radiusCard),
-        side: BorderSide(color: AppColors.primary.withValues(alpha: 0.08)),
+        side: const BorderSide(color: Color(0x14000000)),
       ),
-    ),
-    navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: Colors.white,
-      indicatorColor: AppColors.primary.withValues(alpha: 0.15),
-      labelTextStyle: WidgetStateProperty.resolveWith((states) {
-        final selected = states.contains(WidgetState.selected);
-        return TextStyle(
-          fontSize: 12,
-          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-          color: selected ? AppColors.primary : AppColors.textSecondary,
-        );
-      }),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: Colors.white.withValues(alpha: 0.85),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: AppColors.primary.withValues(alpha: 0.15)),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.primary, width: 1.4),
-      ),
+      border: _frostBorder(color: const Color(0x22000000)),
+      focusedBorder: _frostBorder(color: const Color(0x66000000), width: 1.4),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        backgroundColor: AppColors.primary,
+        backgroundColor: const Color(0xFF2A2A30),
         foregroundColor: Colors.white,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppColors.radiusButton),

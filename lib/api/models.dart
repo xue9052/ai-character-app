@@ -1,5 +1,48 @@
 import 'dart:convert';
 
+/// 会员身份，由后台开通；客户端只读展示。
+class Membership {
+  const Membership({
+    this.tier = 'free',
+    this.label = '体验',
+    this.expiresAt,
+    this.isMember = false,
+    this.expired = false,
+  });
+
+  final String tier;
+  final String label;
+
+  /// unix 秒；null 表示永久有效
+  final int? expiresAt;
+  final bool isMember;
+
+  /// 曾经是会员但已过期，用于提示续费
+  final bool expired;
+
+  DateTime? get expiresOn => expiresAt == null
+      ? null
+      : DateTime.fromMillisecondsSinceEpoch(expiresAt! * 1000);
+
+  factory Membership.fromJson(Map<String, dynamic> j) => Membership(
+        tier: '${j['tier'] ?? 'free'}',
+        label: '${j['label'] ?? '体验'}',
+        expiresAt: j['expires_at'] == null
+            ? null
+            : int.tryParse('${j['expires_at']}'),
+        isMember: j['is_member'] == true,
+        expired: j['expired'] == true,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'tier': tier,
+        'label': label,
+        'expires_at': expiresAt,
+        'is_member': isMember,
+        'expired': expired,
+      };
+}
+
 class AuthUser {
   AuthUser({
     required this.id,
@@ -11,6 +54,11 @@ class AuthUser {
     this.avatarUrl = '',
     this.bio = '',
     this.profileCompleted = false,
+    this.companionPreference = 'female',
+    this.onboardingCompleted = false,
+    this.nightMode = false,
+    this.eveningGreetingEnabled = false,
+    this.membership = const Membership(),
   });
 
   final String id;
@@ -22,6 +70,11 @@ class AuthUser {
   final String avatarUrl;
   final String bio;
   final bool profileCompleted;
+  final String companionPreference;
+  final bool onboardingCompleted;
+  final bool nightMode;
+  final bool eveningGreetingEnabled;
+  final Membership membership;
 
   factory AuthUser.fromJson(Map<String, dynamic> j) => AuthUser(
         id: '${j['id']}',
@@ -33,6 +86,15 @@ class AuthUser {
         avatarUrl: '${j['avatar_url'] ?? ''}',
         bio: '${j['bio'] ?? ''}',
         profileCompleted: j['profile_completed'] == true,
+        companionPreference: '${j['companion_preference'] ?? 'female'}',
+        onboardingCompleted: j['onboarding_completed'] == true,
+        nightMode: j['night_mode'] == true,
+        eveningGreetingEnabled: j['evening_greeting_enabled'] == true,
+        membership: j['membership'] is Map
+            ? Membership.fromJson(
+                Map<String, dynamic>.from(j['membership'] as Map),
+              )
+            : const Membership(),
       );
 }
 
@@ -148,17 +210,76 @@ class PlazaFeed {
     required this.strip,
     required this.grid,
     this.tagPresets = const [],
+    this.voiceCompanionFeatured = const [],
   });
 
   final List<PersonaSummary> strip;
   final List<PersonaSummary> grid;
   final List<String> tagPresets;
+  final List<PersonaSummary> voiceCompanionFeatured;
 
   @Deprecated('use strip')
   List<PersonaSummary> get featured => strip;
 
   @Deprecated('use grid')
   List<PersonaSummary> get all => grid;
+}
+
+class OnboardingConfig {
+  OnboardingConfig({
+    required this.onboardingCompleted,
+    required this.companionPreference,
+    required this.title,
+    required this.subtitle,
+    required this.options,
+    required this.nicknameTitle,
+    required this.nicknameSubtitle,
+    required this.floorTitle,
+    required this.floorSubtitle,
+  });
+
+  final bool onboardingCompleted;
+  final String companionPreference;
+  final String title;
+  final String subtitle;
+  final List<OnboardingOption> options;
+  final String nicknameTitle;
+  final String nicknameSubtitle;
+  final String floorTitle;
+  final String floorSubtitle;
+
+  factory OnboardingConfig.fromJson(Map<String, dynamic> j) => OnboardingConfig(
+        onboardingCompleted: j['onboarding_completed'] == true,
+        companionPreference: '${j['companion_preference'] ?? 'female'}',
+        title: '${j['title'] ?? '你更想和谁聊天？'}',
+        subtitle: '${j['subtitle'] ?? ''}',
+        options: [
+          for (final o in (j['options'] as List? ?? const []))
+            OnboardingOption.fromJson(Map<String, dynamic>.from(o as Map)),
+        ],
+        nicknameTitle: '${j['nickname_title'] ?? '怎么称呼你？'}',
+        nicknameSubtitle: '${j['nickname_subtitle'] ?? ''}',
+        floorTitle: '${j['floor_title'] ?? '精选'}',
+        floorSubtitle: '${j['floor_subtitle'] ?? ''}',
+      );
+}
+
+class OnboardingOption {
+  OnboardingOption({
+    required this.value,
+    required this.label,
+    this.hint = '',
+  });
+
+  final String value;
+  final String label;
+  final String hint;
+
+  factory OnboardingOption.fromJson(Map<String, dynamic> j) => OnboardingOption(
+        value: '${j['value']}',
+        label: '${j['label'] ?? ''}',
+        hint: '${j['hint'] ?? ''}',
+      );
 }
 
 class PersonaSearchResult {
@@ -203,6 +324,7 @@ class PersonaDetail {
     this.backgroundUrl,
     this.alternateGreetings = const [],
     this.voiceProfileId,
+    this.cosyvoiceVoice,
     this.gender,
     this.scenario,
     this.appearance,
@@ -230,6 +352,7 @@ class PersonaDetail {
   final String? backgroundUrl;
   final List<String> alternateGreetings;
   final String? voiceProfileId;
+  final String? cosyvoiceVoice;
   final String? gender;
   final String? scenario;
   final String? appearance;
@@ -245,6 +368,10 @@ class PersonaDetail {
   bool get isPending => reviewStatus == 'pending';
   bool get isRejected => reviewStatus == 'rejected';
   bool get isPrivate => visibility == 'private';
+
+  bool get hasTtsVoice =>
+      (voiceProfileId ?? '').trim().isNotEmpty ||
+      (cosyvoiceVoice ?? '').trim().isNotEmpty;
 
   bool isOwnedBy(String? userId) =>
       userId != null && ownerUserId != null && ownerUserId == userId;
@@ -276,6 +403,9 @@ class PersonaDetail {
         voiceProfileId: (j['voice_profile_id'] as String?)?.trim().isEmpty == true
             ? null
             : j['voice_profile_id'] as String?,
+        cosyvoiceVoice: (j['cosyvoice_voice'] as String?)?.trim().isEmpty == true
+            ? null
+            : j['cosyvoice_voice'] as String?,
         gender: (j['gender'] as String?)?.trim().isEmpty == true
             ? null
             : j['gender'] as String?,
@@ -400,6 +530,8 @@ class ChatMessageDto {
     this.imageUrls = const [],
     this.audioUrl,
     this.ttsChunks = const [],
+    this.meta = const {},
+    this.payload = const {},
   });
 
   final String? id;
@@ -410,6 +542,42 @@ class ChatMessageDto {
   final List<String> imageUrls;
   final String? audioUrl;
   final List<Map<String, dynamic>> ttsChunks;
+  final Map<String, dynamic> meta;
+  final Map<String, dynamic> payload;
+
+  bool get isMemory =>
+      type == 'memory' || meta['memory_card'] == true || meta['kind'] == 'memory_card';
+
+  bool get isSceneImage => meta['scene_image'] != null;
+
+  /// 随机语音条：这条回复是语音，不是文字气泡。
+  bool get isVoiceReply =>
+      type == 'voice' ||
+      meta['voice_reply'] == true ||
+      payload['voice_reply'] == true;
+
+  String get sceneTitle {
+    final scene = meta['scene_image'];
+    if (scene is Map && '${scene['scene_title'] ?? ''}'.trim().isNotEmpty) {
+      return '${scene['scene_title']}'.trim();
+    }
+    return '${payload['scene_title'] ?? ''}'.trim();
+  }
+
+  String get memorySummary =>
+      '${payload['summary'] ?? payload['text'] ?? meta['summary'] ?? ''}'.trim();
+
+  String get memoryImageUrl =>
+      '${payload['image_url'] ?? meta['image_url'] ?? ''}'.trim();
+
+  String get memoryCardTitle {
+    if (sceneTitle.isNotEmpty) return sceneTitle;
+    final c = content.trim();
+    if (c.startsWith('📌')) {
+      return c.replaceFirst('📌 ', '').replaceFirst('记住了：', '').trim();
+    }
+    return c.isNotEmpty ? c : '记住了这一刻';
+  }
 
   factory ChatMessageDto.fromJson(Map<String, dynamic> j) {
     final rawTs = j['ts'] ?? j['created_at'];
@@ -419,10 +587,16 @@ class ChatMessageDto {
     } else if (rawTs is num) {
       ts = rawTs.toInt();
     }
-    final payload = j['payload'];
-    final fromPayload = payload is Map ? payload['text'] : null;
+    final payload = j['payload'] is Map
+        ? Map<String, dynamic>.from(j['payload'] as Map)
+        : <String, dynamic>{};
+    final meta = Map<String, dynamic>.from(j['meta'] as Map? ?? const {});
+    if (meta.isEmpty && payload['_meta'] is Map) {
+      meta.addAll(Map<String, dynamic>.from(payload['_meta'] as Map));
+    }
+    final fromPayload = payload['text'];
     final content = '${j['content'] ?? fromPayload ?? ''}';
-    final type = '${j['type'] ?? (payload is Map ? payload['type'] : null) ?? 'text'}';
+    final type = '${j['type'] ?? (payload['type']) ?? 'text'}';
     final urls = <String>[];
     String? audioUrl;
     void collect(dynamic list) {
@@ -441,12 +615,16 @@ class ChatMessageDto {
     }
 
     collect(j['attachments']);
-    if (payload is Map) collect(payload['attachments']);
+    collect(payload['attachments']);
     final chunks = <Map<String, dynamic>>[];
-    if (payload is Map && payload['tts_chunks'] is List) {
+    if (payload['tts_chunks'] is List) {
       for (final c in payload['tts_chunks'] as List) {
         if (c is Map) chunks.add(Map<String, dynamic>.from(c));
       }
+    }
+    final memUrl = '${payload['image_url'] ?? ''}'.trim();
+    if (memUrl.isNotEmpty && !urls.contains(memUrl)) {
+      urls.add(memUrl);
     }
     final rawId = '${j['id'] ?? j['message_id'] ?? ''}'.trim();
     return ChatMessageDto(
@@ -458,11 +636,14 @@ class ChatMessageDto {
       imageUrls: urls,
       audioUrl: audioUrl,
       ttsChunks: chunks,
+      meta: meta,
+      payload: payload,
     );
   }
 
   /// 会话列表预览文案（多段回复取最后一段）。
   String get listPreviewText {
+    if (isVoiceReply) return '[语音]';
     if (ttsChunks.isNotEmpty) {
       final sorted = List<Map<String, dynamic>>.from(ttsChunks)
         ..sort(
@@ -509,6 +690,66 @@ class VoiceProfileDto {
       previewUrl: j['preview_url'] as String?,
     );
   }
+}
+
+class VoiceCloneRequirementsDto {
+  VoiceCloneRequirementsDto({
+    required this.targetModel,
+    required this.formats,
+    required this.minSeconds,
+    required this.maxSeconds,
+    required this.maxBytes,
+    required this.tips,
+  });
+
+  final String targetModel;
+  final List<String> formats;
+  final double minSeconds;
+  final double maxSeconds;
+  final int maxBytes;
+  final List<String> tips;
+
+  factory VoiceCloneRequirementsDto.fromJson(Map<String, dynamic> j) =>
+      VoiceCloneRequirementsDto(
+        targetModel: '${j['target_model'] ?? 'cosyvoice-v3.5-flash'}',
+        formats: [
+          for (final f in (j['formats'] as List? ?? const ['wav', 'mp3', 'm4a'])) '$f',
+        ],
+        minSeconds: (j['min_seconds'] as num?)?.toDouble() ?? 10,
+        maxSeconds: (j['max_seconds'] as num?)?.toDouble() ?? 30,
+        maxBytes: (j['max_bytes'] as num?)?.toInt() ?? 10485760,
+        tips: [for (final t in (j['tips'] as List? ?? const [])) '$t'],
+      );
+}
+
+class VoiceCloneJobDto {
+  VoiceCloneJobDto({
+    required this.id,
+    required this.status,
+    required this.previewUrl,
+    this.voiceId,
+    this.error = '',
+  });
+
+  final String id;
+  final String status;
+  final String previewUrl;
+  final String? voiceId;
+  final String error;
+
+  bool get isReady => status == 'ready';
+  bool get isFailed => status == 'failed';
+  bool get isProcessing => status == 'processing' || status == 'uploaded';
+
+  factory VoiceCloneJobDto.fromJson(Map<String, dynamic> j) => VoiceCloneJobDto(
+        id: '${j['id']}',
+        status: '${j['status'] ?? ''}',
+        previewUrl: '${j['preview_url'] ?? ''}',
+        voiceId: (j['voice_id'] as String?)?.trim().isEmpty == true
+            ? null
+            : j['voice_id'] as String?,
+        error: '${j['error'] ?? ''}',
+      );
 }
 
 class EmotionDto {
@@ -594,6 +835,165 @@ class WalletDto {
   factory WalletDto.fromJson(Map<String, dynamic> j) => WalletDto(
         stardust: (j['stardust'] as num?)?.toInt() ?? 0,
         currency: '${j['currency'] ?? '星尘'}',
+      );
+}
+
+/// 充值套餐（展示用，暂不接支付发货）
+class RechargePackageDto {
+  RechargePackageDto({
+    required this.id,
+    required this.title,
+    required this.stardust,
+    required this.priceCny,
+    this.badge = '',
+    this.benefits = const [],
+  });
+
+  final String id;
+  final String title;
+  final int stardust;
+  final double priceCny;
+  final String badge;
+  final List<String> benefits;
+
+  factory RechargePackageDto.fromJson(Map<String, dynamic> j) =>
+      RechargePackageDto(
+        id: '${j['id'] ?? ''}',
+        title: '${j['title'] ?? ''}',
+        stardust: (j['stardust'] as num?)?.toInt() ?? 0,
+        priceCny: (j['price_cny'] as num?)?.toDouble() ?? 0,
+        badge: '${j['badge'] ?? ''}'.trim(),
+        benefits: [
+          for (final b in (j['benefits'] as List? ?? const []))
+            if ('$b'.trim().isNotEmpty) '$b'.trim(),
+        ],
+      );
+}
+
+class RechargeCatalogDto {
+  RechargeCatalogDto({
+    this.currency = '星尘',
+    this.note = '',
+    this.contactHint = '',
+    this.purchaseEnabled = false,
+    this.packages = const [],
+  });
+
+  final String currency;
+  final String note;
+  final String contactHint;
+  final bool purchaseEnabled;
+  final List<RechargePackageDto> packages;
+
+  factory RechargeCatalogDto.fromJson(Map<String, dynamic> j) =>
+      RechargeCatalogDto(
+        currency: '${j['currency'] ?? '星尘'}',
+        note: '${j['note'] ?? ''}'.trim(),
+        contactHint: '${j['contact_hint'] ?? ''}'.trim(),
+        purchaseEnabled: j['purchase_enabled'] == true,
+        packages: [
+          for (final p in (j['packages'] as List? ?? const []))
+            RechargePackageDto.fromJson(Map<String, dynamic>.from(p as Map)),
+        ],
+      );
+}
+
+/// VIP 订阅商品（开通送星尘）
+class VipSubscriptionDto {
+  VipSubscriptionDto({
+    required this.id,
+    required this.tier,
+    required this.title,
+    required this.days,
+    required this.priceCny,
+    this.originalPriceCny = 0,
+    this.badge = '',
+    this.stardustGift = 0,
+  });
+
+  final String id;
+  final String tier;
+  final String title;
+  final int days;
+  final double priceCny;
+  final double originalPriceCny;
+  final String badge;
+  final int stardustGift;
+
+  factory VipSubscriptionDto.fromJson(Map<String, dynamic> j) =>
+      VipSubscriptionDto(
+        id: '${j['id'] ?? ''}',
+        tier: '${j['tier'] ?? ''}',
+        title: '${j['title'] ?? ''}',
+        days: (j['days'] as num?)?.toInt() ?? 30,
+        priceCny: (j['price_cny'] as num?)?.toDouble() ?? 0,
+        originalPriceCny: (j['original_price_cny'] as num?)?.toDouble() ?? 0,
+        badge: '${j['badge'] ?? ''}'.trim(),
+        stardustGift: (j['stardust_gift'] as num?)?.toInt() ?? 0,
+      );
+}
+
+class VipBenefitRowDto {
+  VipBenefitRowDto({
+    required this.key,
+    required this.label,
+    this.values = const {},
+  });
+
+  final String key;
+  final String label;
+  final Map<String, String> values;
+
+  factory VipBenefitRowDto.fromJson(Map<String, dynamic> j) {
+    final raw = j['values'];
+    final values = <String, String>{};
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        final key = '$k'.trim();
+        final val = '$v'.trim();
+        if (key.isNotEmpty && val.isNotEmpty) values[key] = val;
+      });
+    }
+    return VipBenefitRowDto(
+      key: '${j['key'] ?? ''}',
+      label: '${j['label'] ?? ''}',
+      values: values,
+    );
+  }
+
+  String valueFor(String tier) => values[tier] ?? '—';
+}
+
+class VipCatalogDto {
+  VipCatalogDto({
+    this.defaultTier = 'free',
+    this.currency = '星尘',
+    this.contactHint = '',
+    this.purchaseEnabled = false,
+    this.subscriptions = const [],
+    this.benefitRows = const [],
+  });
+
+  final String defaultTier;
+  final String currency;
+  final String contactHint;
+  final bool purchaseEnabled;
+  final List<VipSubscriptionDto> subscriptions;
+  final List<VipBenefitRowDto> benefitRows;
+
+  factory VipCatalogDto.fromJson(Map<String, dynamic> j) => VipCatalogDto(
+        defaultTier: '${j['default_tier'] ?? 'free'}',
+        currency: '${j['currency'] ?? '星尘'}',
+        contactHint: '${j['contact_hint'] ?? ''}'.trim(),
+        purchaseEnabled: j['purchase_enabled'] == true,
+        subscriptions: [
+          for (final s in (j['subscriptions'] as List? ?? const []))
+            VipSubscriptionDto.fromJson(Map<String, dynamic>.from(s as Map)),
+        ],
+        benefitRows: [
+          for (final r in (j['benefit_rows'] as List? ?? const []))
+            VipBenefitRowDto.fromJson(Map<String, dynamic>.from(r as Map)),
+        ],
       );
 }
 
@@ -688,4 +1088,238 @@ class MemoryItemDto {
         return c?.isNotEmpty == true ? c! : '其他';
     }
   }
+}
+
+class GroupChatConfig {
+  GroupChatConfig({
+    required this.enabled,
+    this.jealousyEnabled = true,
+    this.resolvePayEnabled = true,
+    this.icebreakOnOpen = true,
+    this.debug = false,
+    this.maxGroupsPerUser = 10,
+  });
+
+  final bool enabled;
+  final bool jealousyEnabled;
+  final bool resolvePayEnabled;
+  final bool icebreakOnOpen;
+  final bool debug;
+  final int maxGroupsPerUser;
+
+  factory GroupChatConfig.fromJson(Map<String, dynamic> j) => GroupChatConfig(
+        enabled: j['group_chat_enabled'] == true,
+        jealousyEnabled: j['jealousy_enabled'] != false,
+        resolvePayEnabled: j['resolve_pay_enabled'] != false,
+        icebreakOnOpen: j['icebreak_on_open'] != false,
+        debug: j['debug'] == true,
+        maxGroupsPerUser: (j['max_groups_per_user'] as num?)?.toInt() ?? 10,
+      );
+}
+
+class GroupMemberDto {
+  GroupMemberDto({
+    required this.personaId,
+    required this.name,
+    this.nameSnapshot = '',
+    this.coverUrl = '',
+    this.active = true,
+    this.deleted = false,
+    this.jealousy = 0,
+    this.tier = 'normal',
+    this.renamed = false,
+  });
+
+  final String personaId;
+  final String name;
+  final String nameSnapshot;
+  final String coverUrl;
+  final bool active;
+  final bool deleted;
+  final int jealousy;
+  final String tier;
+  final bool renamed;
+
+  String tierLabel() {
+    switch (tier) {
+      case 'jealous':
+        return '吃醋';
+      case 'cold_war':
+        return '冷战';
+      default:
+        return '平静';
+    }
+  }
+
+  factory GroupMemberDto.fromJson(Map<String, dynamic> j) => GroupMemberDto(
+        personaId: '${j['persona_id'] ?? ''}',
+        name: '${j['name'] ?? j['name_snapshot'] ?? ''}',
+        nameSnapshot: '${j['name_snapshot'] ?? ''}',
+        coverUrl: '${j['cover_url'] ?? ''}',
+        active: j['active'] != false,
+        deleted: j['deleted'] == true,
+        jealousy: (j['jealousy'] as num?)?.toInt() ?? 0,
+        tier: '${j['tier'] ?? 'normal'}',
+        renamed: j['renamed'] == true,
+      );
+}
+
+class GroupSummaryDto {
+  GroupSummaryDto({
+    required this.id,
+    required this.title,
+    this.coverUrl = '',
+    this.lastPreview = '',
+    this.lastSeq = 0,
+    this.lastMessageAt = 0,
+    this.canSend = true,
+    this.members = const [],
+    this.memberCovers = const [],
+  });
+
+  final String id;
+  final String title;
+  final String coverUrl;
+  final String lastPreview;
+  final int lastSeq;
+  final int lastMessageAt;
+  final bool canSend;
+  final List<GroupMemberDto> members;
+  final List<String> memberCovers;
+
+  factory GroupSummaryDto.fromJson(Map<String, dynamic> j) => GroupSummaryDto(
+        id: '${j['id']}',
+        title: '${j['title'] ?? ''}',
+        coverUrl: '${j['cover_url'] ?? ''}',
+        lastPreview: '${j['last_preview'] ?? ''}',
+        lastSeq: (j['last_seq'] as num?)?.toInt() ?? 0,
+        lastMessageAt: (j['last_message_at'] as num?)?.toInt() ?? 0,
+        canSend: j['can_send'] != false,
+        members: [
+          for (final m in (j['members'] as List? ?? const []))
+            GroupMemberDto.fromJson(Map<String, dynamic>.from(m as Map)),
+        ],
+        memberCovers: [
+          for (final u in (j['member_covers'] as List? ?? const [])) '$u',
+        ],
+      );
+
+  /// 列表接口带 member_covers；详情页从成员 cover 推导。
+  List<String> get effectiveMemberCovers {
+    if (memberCovers.isNotEmpty) return memberCovers;
+    return members
+        .where((m) => m.active && !m.deleted && m.coverUrl.isNotEmpty)
+        .map((m) => m.coverUrl)
+        .toList();
+  }
+
+  /// 背景：自定义群头像优先，否则用第一个成员封面。
+  String? get backdropCoverUrl {
+    if (coverUrl.isNotEmpty) return coverUrl;
+    final covers = effectiveMemberCovers;
+    return covers.isNotEmpty ? covers.first : null;
+  }
+}
+
+class GroupMessageDto {
+  GroupMessageDto({
+    required this.id,
+    required this.groupId,
+    required this.seq,
+    required this.senderType,
+    this.senderId = '',
+    this.content = '',
+    this.messageType = 'text',
+    this.meta = const {},
+    this.createdAt = 0,
+  });
+
+  final String id;
+  final String groupId;
+  final int seq;
+  final String senderType;
+  final String senderId;
+  final String content;
+  final String messageType;
+  final Map<String, dynamic> meta;
+  final int createdAt;
+
+  String get kind => '${meta['kind'] ?? ''}';
+  String get senderName => '${meta['sender_name'] ?? ''}';
+  String? get clientMsgId => meta['client_msg_id'] as String?;
+  bool get resolveOffer => meta['resolve_offer'] == true;
+
+  bool get isUser => senderType == 'user';
+  bool get isAi => senderType == 'ai';
+  bool get isSystem => senderType == 'system';
+  bool get isImage => messageType == 'image' || meta['image_url'] != null;
+  String get imageUrl => '${meta['image_url'] ?? ''}';
+  String get giftName => '${meta['gift_name'] ?? ''}';
+  String get giftPersonaName => '${meta['persona_name'] ?? ''}';
+  bool get isMemory =>
+      messageType == 'memory' || kind == 'memory_card';
+  bool get isSceneImage => kind == 'scene_image';
+  String get sceneTitle => '${meta['scene_title'] ?? ''}';
+  String get memorySummary => '${meta['summary'] ?? ''}';
+  bool get isAiGift => meta['ai_gift'] == true;
+  String get audioUrl => '${meta['audio_url'] ?? ''}';
+  bool get hasVoiceReply =>
+      audioUrl.isNotEmpty || meta['voice_reply'] == true;
+
+  factory GroupMessageDto.fromJson(Map<String, dynamic> j) => GroupMessageDto(
+        id: '${j['id']}',
+        groupId: '${j['group_id'] ?? ''}',
+        seq: (j['seq'] as num?)?.toInt() ?? 0,
+        senderType: '${j['sender_type'] ?? ''}',
+        senderId: '${j['sender_id'] ?? ''}',
+        content: '${j['content'] ?? ''}',
+        messageType: '${j['message_type'] ?? 'text'}',
+        meta: Map<String, dynamic>.from(j['meta'] as Map? ?? const {}),
+        createdAt: (j['created_at'] as num?)?.toInt() ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'group_id': groupId,
+        'seq': seq,
+        'sender_type': senderType,
+        'sender_id': senderId,
+        'content': content,
+        'message_type': messageType,
+        'meta': meta,
+        'created_at': createdAt,
+      };
+}
+
+class GroupMemoryDto {
+  GroupMemoryDto({
+    required this.id,
+    required this.groupId,
+    this.sceneId = '',
+    this.title = '',
+    this.summary = '',
+    this.imageUrl = '',
+    this.auto = true,
+    this.createdAt = 0,
+  });
+
+  final String id;
+  final String groupId;
+  final String sceneId;
+  final String title;
+  final String summary;
+  final String imageUrl;
+  final bool auto;
+  final int createdAt;
+
+  factory GroupMemoryDto.fromJson(Map<String, dynamic> j) => GroupMemoryDto(
+        id: '${j['id']}',
+        groupId: '${j['group_id'] ?? ''}',
+        sceneId: '${j['scene_id'] ?? ''}',
+        title: '${j['title'] ?? ''}',
+        summary: '${j['summary'] ?? ''}',
+        imageUrl: '${j['image_url'] ?? ''}',
+        auto: j['auto'] == true,
+        createdAt: (j['created_at'] as num?)?.toInt() ?? 0,
+      );
 }

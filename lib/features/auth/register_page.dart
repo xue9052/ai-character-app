@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_exception.dart';
 import '../../services/app_state.dart';
-import '../settings/edit_profile_page.dart';
+import '../../theme/app_widgets.dart';
+import 'email_code_cooldown.dart';
 
 class RegisterPage extends StatefulWidget {
   const RegisterPage({super.key});
@@ -11,18 +12,18 @@ class RegisterPage extends StatefulWidget {
   State<RegisterPage> createState() => _RegisterPageState();
 }
 
-class _RegisterPageState extends State<RegisterPage> {
+class _RegisterPageState extends State<RegisterPage> with EmailCodeCooldown {
   final _email = TextEditingController();
   final _code = TextEditingController();
   final _password = TextEditingController();
   final _password2 = TextEditingController();
   bool _busy = false;
   bool _sending = false;
-  int _cooldown = 0;
   String? _devHint;
 
   @override
   void dispose() {
+    disposeEmailCodeCooldown();
     _email.dispose();
     _code.dispose();
     _password.dispose();
@@ -46,13 +47,13 @@ class _RegisterPageState extends State<RegisterPage> {
         purpose: 'register',
       );
       final dev = data['dev_code']?.toString();
+      final wait = (data['retry_after'] as num?)?.toInt() ??
+          (data['cooldown'] as num?)?.toInt() ??
+          60;
       setState(() {
-        _cooldown = (data['retry_after'] as num?)?.toInt() ??
-            (data['cooldown'] as num?)?.toInt() ??
-            60;
         _devHint = (dev != null && dev.isNotEmpty) ? '开发模式验证码：$dev' : null;
       });
-      _tickCooldown();
+      startEmailCodeCooldown(wait);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -66,8 +67,7 @@ class _RegisterPageState extends State<RegisterPage> {
     } catch (e) {
       if (!mounted) return;
       if (e is ApiException && e.retryAfter != null && e.retryAfter! > 0) {
-        setState(() => _cooldown = e.retryAfter!);
-        _tickCooldown();
+        startEmailCodeCooldown(e.retryAfter!);
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(apiErrorMessage(e))),
@@ -75,15 +75,6 @@ class _RegisterPageState extends State<RegisterPage> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
-  }
-
-  void _tickCooldown() {
-    Future.doWhile(() async {
-      await Future<void>.delayed(const Duration(seconds: 1));
-      if (!mounted || _cooldown <= 0) return false;
-      setState(() => _cooldown -= 1);
-      return _cooldown > 0;
-    });
   }
 
   Future<void> _register() async {
@@ -119,14 +110,11 @@ class _RegisterPageState extends State<RegisterPage> {
       );
       await s.applySession(session);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      final messenger = ScaffoldMessenger.of(context);
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      messenger.showSnackBar(
         SnackBar(
           content: Text('注册成功，昵称「${session.user.nickname}」已自动生成'),
-        ),
-      );
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => const EditProfilePage(fromRegister: true),
         ),
       );
     } catch (e) {
@@ -178,9 +166,11 @@ class _RegisterPageState extends State<RegisterPage> {
               const SizedBox(width: 10),
               SizedBox(
                 height: 56,
-                child: FilledButton.tonal(
-                  onPressed: (_sending || _cooldown > 0) ? null : _sendCode,
-                  child: Text(_cooldown > 0 ? '${_cooldown}s' : '获取验证码'),
+                child: FrostButton(
+                  expanded: false,
+                  height: 56,
+                  onPressed: (_sending || cooldown > 0) ? null : _sendCode,
+                  child: Text(cooldown > 0 ? '${cooldown}s' : '获取验证码'),
                 ),
               ),
             ],
@@ -211,7 +201,7 @@ class _RegisterPageState extends State<RegisterPage> {
             ),
           ),
           const SizedBox(height: 24),
-          FilledButton(
+          FrostButton(
             onPressed: _busy ? null : _register,
             child: _busy
                 ? const SizedBox(

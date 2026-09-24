@@ -6,11 +6,14 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
     <!-- Android 13+ 系统通知（极光推送） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- 极光 JPush 常用权限（插件也会合并，此处显式声明） -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
-    <!-- 选图上传头像（Android 13+） -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <!-- 常驻前台服务：后台保持聊天长连接 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <!-- 旧系统相册 -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -21,16 +24,18 @@
         android:maxSdkVersion="29"/>
 
     <application
-        android:label="AI虚拟角色"
+        android:label="Soulora"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:largeHeap="true"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config">
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
-            android:taskAffinity=""
+            android:launchMode="singleTask"
+            android:alwaysRetainTaskState="true"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
@@ -44,6 +49,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <service
+            android:name=".keepalive.ConnectionService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="true" />
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

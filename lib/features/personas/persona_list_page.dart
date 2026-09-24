@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../api/models.dart';
 import '../../services/app_state.dart';
 import '../../theme/app_theme.dart';
+import '../../theme/app_widgets.dart';
 import '../chat/chat_page.dart';
 import 'persona_presets.dart';
 import 'persona_editor_page.dart';
@@ -57,8 +58,8 @@ class _PersonaListPageState extends State<PersonaListPage> {
 
   int get _selectedTabIndex => _indexForTag(_tag);
 
-  Future<void> _loadTag(String? tag, {bool initial = false}) async {
-    if (!initial && _gridCache.containsKey(tag)) {
+  Future<void> _loadTag(String? tag, {bool initial = false, bool force = false}) async {
+    if (!initial && !force && _gridCache.containsKey(tag)) {
       if (mounted) setState(() => _tag = tag);
       return;
     }
@@ -78,18 +79,30 @@ class _PersonaListPageState extends State<PersonaListPage> {
     }
 
     try {
-      final feed = await api.listPlaza(s.userId, tag: tag);
-      if (!mounted) return;
-      setState(() {
-        if (feed.tagPresets.isNotEmpty) {
-          _tagPresets = feed.tagPresets;
-        }
-        _gridCache[tag] = feed.grid;
-        _errorCache[tag] = null;
-        _loadingTags.remove(tag);
-        _initialLoading = false;
-        _error = null;
-      });
+      if (tag != null && tag.isNotEmpty) {
+        final grid = await api.listPlazaGrid(s.userId, tag: tag);
+        if (!mounted) return;
+        setState(() {
+          _gridCache[tag] = grid;
+          _errorCache[tag] = null;
+          _loadingTags.remove(tag);
+          _initialLoading = false;
+          _error = null;
+        });
+      } else {
+        final feed = await api.listPlaza(s.userId, tag: tag);
+        if (!mounted) return;
+        setState(() {
+          if (feed.tagPresets.isNotEmpty) {
+            _tagPresets = feed.tagPresets;
+          }
+          _gridCache[tag] = feed.grid;
+          _errorCache[tag] = null;
+          _loadingTags.remove(tag);
+          _initialLoading = false;
+          _error = null;
+        });
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -101,7 +114,7 @@ class _PersonaListPageState extends State<PersonaListPage> {
     }
   }
 
-  Future<void> _reloadTag(String? tag) => _loadTag(tag, initial: true);
+  Future<void> _reloadTag(String? tag) => _loadTag(tag, force: true);
 
   Future<void> _reloadCurrent() => _reloadTag(_tag);
 
@@ -186,7 +199,7 @@ class _PersonaListPageState extends State<PersonaListPage> {
     return Theme(
       data: buildAppDarkTheme(),
       child: Scaffold(
-        backgroundColor: const Color(0xFF0E0E14),
+        backgroundColor: AppColors.bgDark,
         body: SafeArea(
           bottom: false,
           child: Column(
@@ -208,17 +221,16 @@ class _PersonaListPageState extends State<PersonaListPage> {
       child: Row(
         children: [
           const Spacer(),
-          IconButton(
+          FrostIconButton(
             tooltip: '创建角色',
-            onPressed: _openCreate,
-            icon: const Icon(Icons.add_circle_outline_rounded),
-            color: Colors.white70,
+            onTap: _openCreate,
+            icon: Icons.add_rounded,
           ),
-          IconButton(
+          const SizedBox(width: 6),
+          FrostIconButton(
             tooltip: '搜索',
-            onPressed: _openSearch,
-            icon: const Icon(Icons.search_rounded),
-            color: Colors.white70,
+            onTap: _openSearch,
+            icon: Icons.search_rounded,
           ),
         ],
       ),
@@ -252,8 +264,8 @@ class _PersonaListPageState extends State<PersonaListPage> {
                         fontSize: 15,
                         fontWeight: active ? FontWeight.w700 : FontWeight.w500,
                         color: active
-                            ? Colors.white
-                            : Colors.white.withValues(alpha: 0.45),
+                            ? AppColors.textPrimary
+                            : AppColors.textMuted,
                       ),
                     ),
                     const SizedBox(height: 6),
@@ -277,12 +289,6 @@ class _PersonaListPageState extends State<PersonaListPage> {
   }
 
   Widget _buildPager() {
-    if (_initialLoading && _gridCache.isEmpty) {
-      return const Center(
-        child: CircularProgressIndicator(color: AppColors.primaryLight),
-      );
-    }
-
     return PageView.builder(
       controller: _pageController,
       itemCount: _tabs.length,
@@ -366,24 +372,8 @@ class _PersonaListPageState extends State<PersonaListPage> {
           parent: BouncingScrollPhysics(),
         ),
         slivers: [
-          if (loading)
-            const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.only(bottom: 12, top: 8),
-                child: Center(
-                  child: SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: AppColors.primaryLight,
-                    ),
-                  ),
-                ),
-              ),
-            ),
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 100),
+            padding: const EdgeInsets.fromLTRB(12, 16, 12, 100),
             sliver: plazaWaterfallSliver(
               items: gridItems,
               baseUrl: baseUrl,

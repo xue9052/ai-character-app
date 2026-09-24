@@ -1,4 +1,5 @@
 ﻿import 'dart:async';
+import 'dart:ui' show ImageFilter;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -14,13 +15,20 @@ import '../../api/models.dart';
 import '../../services/chat_local_store.dart';
 import '../../services/app_state.dart';
 import '../../services/greeting_prefs.dart';
+import '../../services/voice_reply_planner.dart';
 import '../../theme/app_theme.dart';
+import '../../theme/app_widgets.dart';
 import '../../widgets/gift_svga_overlay.dart';
-import '../../widgets/user_avatar.dart';
+import '../../widgets/voice_play_chip.dart';
+import '../../widgets/scene_memory_card.dart';
+import '../../widgets/scene_quota_badge.dart';
 import '../memory/memory_page.dart';
 import '../personas/persona_cover.dart';
 import '../personas/persona_detail_page.dart';
-import '../personas/persona_presets.dart';
+import '../wallet/membership_benefits_page.dart';
+import 'chat_backdrop.dart';
+import 'chat_top_bar.dart';
+import 'bond_display.dart';
 import 'voice_call_page.dart';
 
 class _TtsSeg {
@@ -70,7 +78,7 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
-class _ChatPageState extends State<ChatPage> {
+class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final _messages = <ChatMessage>[];
   final _inputCtrl = TextEditingController();
   final _scroll = ScrollController();
@@ -105,21 +113,29 @@ class _ChatPageState extends State<ChatPage> {
   final Map<String, String> _messageAudioUrls = {};
   /// 本地预览（发图改图等待中）
   final Map<String, Uint8List> _messageLocalBytes = {};
+  final Map<String, _ChatMsgExtra> _chatExtras = {};
+  int _scenePollGen = 0;
+  VoiceReplyPlanner _voicePlanner = VoiceReplyPlanner();
+  int? _sceneRemaining;
+  int? _sceneLimit;
   /// 助手侧「制作中」占位
   final Set<String> _pendingGenMsgIds = {};
   final Set<String> _ttsLoadingIds = {};
   final _audioPlayer = AudioPlayer();
   String? _playingMsgId;
   String? _voiceProfileId;
+  String? _cosyvoiceVoice;
   int? _imageEditRemaining;
   /// 当前全屏礼物特效 URL；播完清空
   String? _giftEffectUrl;
   Completer<void>? _ttsPlayWait;
   final Map<String, Map<int, _TtsSeg>> _messageSegs = {};
-  /// 新回复多气泡：已露出的段数（历史默认全露）
+  /// 新回复多气泡：已露出的段数（收到即全露，不跟播放进度走）
   final Map<String, int> _segVisibleCount = {};
-  /// 防止多次 stagger 并发把气泡一下拉满
-  final Map<String, int> _segStaggerGen = {};
+  /// 随机语音条：这条回复只显示语音，不显示文字。
+  final Set<String> _voiceBarIds = {};
+  /// 自动朗读的消息：句子语音按序自动播。
+  final Set<String> _autoReadMsgIds = {};
   final Map<int, String> _ttsSeqUrls = {};
   final Map<int, String> _ttsSeqTexts = {};
   final Map<String, Map<int, String>> _messageTtsChunks = {};
@@ -131,9 +147,15 @@ class _ChatPageState extends State<ChatPage> {
   /// JSON/礼物整段朗读：开声后再把正文填进气泡
   final Map<String, String> _pendingRevealText = {};
 
+  bool get _hasTtsVoice =>
+      (_voiceProfileId ?? '').trim().isNotEmpty ||
+      (_cosyvoiceVoice ?? '').trim().isNotEmpty;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _focus.addListener(_onInputFocus);
     _oneLiner = widget.personaOneLiner;
     _coverUrl = widget.personaCoverUrl;
     _coverEmoji = widget.personaCoverEmoji;
@@ -148,6 +170,13 @@ class _ChatPageState extends State<ChatPage> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final s = AppStateScope.of(context);
+      unawaited(
+        s.api().markInboxRead(
+          userId: s.userId,
+          kind: 'direct',
+          peerId: widget.personaId,
+        ),
+      );
       var fromCache = false;
 
       final local = await ChatLocalStore.instance.loadBootstrap(
@@ -172,11 +201,39 @@ class _ChatPageState extends State<ChatPage> {
         });
       }
       if (mounted) _loadHistory(fromCache: fromCache);
+      unawaited(_loadVoicePlanner());
+      unawaited(_refreshSceneQuota());
     });
+  }
+
+  Future<void> _refreshSceneQuota() async {
+    if (!mounted) return;
+    final s = AppStateScope.of(context);
+    try {
+      final q = await s.api().getSceneImageQuota(s.userId);
+      if (!mounted) return;
+      setState(() {
+        _sceneRemaining = (q['remaining'] as num?)?.toInt();
+        _sceneLimit = (q['limit'] as num?)?.toInt();
+      });
+    } catch (_) {/* ignore */}
+  }
+
+  Future<void> _loadVoicePlanner() async {
+    final s = AppStateScope.of(context);
+    final planner = await VoiceReplyPlanner.load(
+      userId: s.userId,
+      scopeId: widget.personaId,
+    );
+    planner.syncTurnCount(_messages.where((m) => m.isUser).length);
+    if (mounted) _voicePlanner = planner;
   }
 
   @override
   void dispose() {
+    _markRead();
+    WidgetsBinding.instance.removeObserver(this);
+    _focus.removeListener(_onInputFocus);
     _scroll.removeListener(_onScrollForOlder);
     final w = _ttsPlayWait;
     if (w != null && !w.isCompleted) w.complete();
@@ -206,6 +263,7 @@ class _ChatPageState extends State<ChatPage> {
       totalMessages: _previewTotal(),
     );
     unawaited(_persistLocalSnapshot());
+    _markRead();
   }
 
   Future<void> _persistLocalSnapshot() async {
@@ -222,7 +280,19 @@ class _ChatPageState extends State<ChatPage> {
         'content': m.text,
         'ts': baseTs - (_messages.length - i),
       };
-      if (segs.isNotEmpty) {
+      if (_voiceBarIds.contains(m.id)) {
+        final audio = _messageAudioUrls[m.id] ?? '';
+        map['type'] = 'voice';
+        map['meta'] = {'voice_reply': true};
+        map['payload'] = {
+          'text': m.text,
+          'voice_reply': true,
+          if (audio.isNotEmpty)
+            'attachments': [
+              {'kind': 'audio', 'url': audio},
+            ],
+        };
+      } else if (segs.isNotEmpty) {
         map['payload'] = {
           'text': m.text,
           'tts_chunks': [
@@ -288,6 +358,19 @@ class _ChatPageState extends State<ChatPage> {
     return loaded;
   }
 
+  void _markRead() {
+    if (!mounted) return;
+    final s = AppStateScope.of(context);
+    final readTotal = _historyTotal > 0
+        ? (_historyTotal > _previewTotal() ? _historyTotal : _previewTotal())
+        : _previewTotal();
+    unawaited(ChatLocalStore.instance.setLastReadTotal(
+      s.userId,
+      widget.personaId,
+      readTotal,
+    ));
+  }
+
   /// 会话列表预览：多气泡 assistant 取最后一段，避免单行省略只露出第一句。
   String _listPreviewText({
     required String text,
@@ -295,6 +378,7 @@ class _ChatPageState extends State<ChatPage> {
     String? msgId,
   }) {
     if (fromUser) return text.trim();
+    if (msgId != null && _voiceBarIds.contains(msgId)) return '[语音]';
     if (msgId != null) {
       final segs = _orderedSegs(msgId);
       if (segs.isNotEmpty) {
@@ -315,7 +399,9 @@ class _ChatPageState extends State<ChatPage> {
       _messageAudioUrls.clear();
       _messageSegs.clear();
       _segVisibleCount.clear();
-      _segStaggerGen.clear();
+      _voiceBarIds.clear();
+      _autoReadMsgIds.clear();
+      _chatExtras.clear();
     }
     final out = <ChatMessage>[];
     for (var i = 0; i < raw.length; i++) {
@@ -325,33 +411,155 @@ class _ChatPageState extends State<ChatPage> {
       final id = (m.id != null && m.id!.isNotEmpty)
           ? m.id!
           : 'hist_${indexOffset + i}';
-      if (m.imageUrls.isNotEmpty) {
-        _messageImages[id] = List<String>.from(m.imageUrls);
-      }
-      if (m.audioUrl != null && m.audioUrl!.isNotEmpty) {
-        _messageAudioUrls[id] = m.audioUrl!;
-      }
-      final text = m.content.isNotEmpty
-          ? m.content
-          : (m.imageUrls.isNotEmpty ? '[图片]' : '');
-      if (m.ttsChunks.isNotEmpty) {
-        _ingestTtsChunks(id, m.ttsChunks);
-        _segVisibleCount[id] = _orderedSegs(id).length;
-      }
-      // 无后端 tts_chunks 时不本地切句：单气泡展示全文
-      if (m.role == 'assistant') {
-        out.add(
-          ChatMessage.assistant(
-            id: id,
-            text: text,
-            senderName: widget.personaName,
-          ),
-        );
-      } else {
-        out.add(ChatMessage.user(id: id, text: text));
-      }
+      final msg = _ingestDto(m, id);
+      if (msg != null) out.add(msg);
     }
     return out;
+  }
+
+  ChatMessage? _ingestDto(ChatMessageDto m, String id) {
+    if (m.imageUrls.isNotEmpty) {
+      _messageImages[id] = List<String>.from(m.imageUrls);
+    }
+    if (m.audioUrl != null && m.audioUrl!.isNotEmpty) {
+      _messageAudioUrls[id] = m.audioUrl!;
+    }
+    final imageUrl = m.memoryImageUrl;
+    if (imageUrl.isNotEmpty && (_messageImages[id] ?? const []).isEmpty) {
+      _messageImages[id] = [imageUrl];
+    }
+    _chatExtras[id] = _ChatMsgExtra(
+      isMemory: m.isMemory,
+      isSceneImage: m.isSceneImage,
+      sceneTitle: m.isMemory ? m.memoryCardTitle : m.sceneTitle,
+      summary: m.memorySummary,
+      imageUrl: imageUrl,
+    );
+    final text = m.content.isNotEmpty
+        ? m.content
+        : (m.imageUrls.isNotEmpty ? '[图片]' : '');
+    if (m.isVoiceReply) {
+      _voiceBarIds.add(id);
+    } else if (m.ttsChunks.isNotEmpty) {
+      _ingestTtsChunks(id, m.ttsChunks);
+      _segVisibleCount[id] = _orderedSegs(id).length;
+    }
+    if (m.isMemory) {
+      return ChatMessage.assistant(
+        id: id,
+        text: text,
+        senderName: widget.personaName,
+      );
+    }
+    if (m.role == 'assistant') {
+      return ChatMessage.assistant(
+        id: id,
+        text: text,
+        senderName: widget.personaName,
+      );
+    }
+    return ChatMessage.user(id: id, text: text);
+  }
+
+  bool _appendRawMessage(Map<String, dynamic> raw) {
+    final m = ChatMessageDto.fromJson(raw);
+    final id = (m.id != null && m.id!.isNotEmpty) ? m.id! : '';
+    if (id.isEmpty || _messages.any((x) => x.id == id)) return false;
+    final msg = _ingestDto(m, id);
+    if (msg == null) return false;
+    _messages.add(msg);
+    return true;
+  }
+
+  Future<void> _pollSceneFollowups() async {
+    final gen = ++_scenePollGen;
+    final s = AppStateScope.of(context);
+    var stableRounds = 0;
+    for (var i = 0; i < 30; i++) {
+      if (!mounted || gen != _scenePollGen) return;
+      await Future<void>.delayed(Duration(seconds: i == 0 ? 3 : 2));
+      if (!mounted || gen != _scenePollGen) return;
+      try {
+        final data = await s.api().getChat(
+          userId: s.userId,
+          personaId: widget.personaId,
+          limit: 40,
+        );
+        if (gen != _scenePollGen) return;
+        final raw = (data['messages'] as List?) ?? const [];
+        var gotNew = false;
+        for (final item in raw) {
+          if (item is! Map) continue;
+          if (_appendRawMessage(Map<String, dynamic>.from(item))) {
+            gotNew = true;
+          }
+        }
+        if (gotNew) {
+          stableRounds = 0;
+          if (mounted) {
+            setState(() {});
+            _scrollToBottom();
+            _markRead();
+          }
+          unawaited(_persistLocalSnapshot());
+          unawaited(_refreshSceneQuota());
+        } else {
+          stableRounds++;
+          if (stableRounds >= 3 && i >= 2) break;
+        }
+      } catch (_) {/* ignore */ }
+    }
+    unawaited(_refreshSceneQuota());
+  }
+
+  Future<void> _rememberMessage(ChatMessage message) async {
+    final extra = _chatExtras[message.id];
+    if (extra?.isMemory == true) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.bgDarkElevated,
+        title: const Text('记住这一刻'),
+        content: const Text('把这条消息保存成场景记忆卡？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('记住'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      final s = AppStateScope.of(context);
+      final data = await s.api().rememberChatMessage(
+        userId: s.userId,
+        personaId: widget.personaId,
+        messageId: message.id,
+      );
+      final cardRaw = data['message'];
+      if (cardRaw is Map && _appendRawMessage(Map<String, dynamic>.from(cardRaw))) {
+        if (mounted) {
+          setState(() {});
+          _scrollToBottom();
+          _markRead();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('已记住这一刻')),
+          );
+        }
+        unawaited(_persistLocalSnapshot());
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('记住失败：$e')),
+        );
+      }
+    }
   }
 
   void _applyHistoryPageMeta(Map<String, dynamic> data) {
@@ -464,6 +672,8 @@ class _ChatPageState extends State<ChatPage> {
     if (personaRaw is Map) {
       _applyPersonaLite(Map<String, dynamic>.from(personaRaw));
     }
+    _voicePlanner.syncTurnCount(_messages.where((m) => m.isUser).length);
+    _markRead();
   }
 
   Future<void> _loadHistory({bool fromCache = false}) async {
@@ -473,40 +683,45 @@ class _ChatPageState extends State<ChatPage> {
     try {
       Map<String, dynamic> data;
       try {
-        data = await api.getChatBootstrap(
-          userId: s.userId,
-          personaId: widget.personaId,
-          limit: 30,
-        );
+        final parts = await Future.wait([
+          api.getChat(
+            userId: s.userId,
+            personaId: widget.personaId,
+            limit: 30,
+            seedGreeting: false,
+          ),
+          api.getChatMeta(
+            userId: s.userId,
+            personaId: widget.personaId,
+          ),
+        ]);
+        final chat = parts[0];
+        final meta = parts[1];
+        data = <String, dynamic>{
+          ...chat,
+          'persona': meta['persona'],
+          'bond': meta['bond'],
+          'greeting': meta['greeting'] ?? chat['greeting'],
+        };
       } catch (_) {
-        // 旧服务端无 bootstrap 时回退
-        data = await api.getChat(
-          userId: s.userId,
-          personaId: widget.personaId,
-          limit: 30,
-        );
-      }
-
-      s.setChatBootstrapCache(widget.personaId, data);
-      await ChatLocalStore.instance.saveBootstrap(
-        s.userId,
-        widget.personaId,
-        data,
-        personaName: widget.personaName,
-        oneLiner: _oneLiner ?? widget.personaOneLiner,
-        coverUrl: _coverUrl ?? widget.personaCoverUrl,
-        coverEmoji: _coverEmoji ?? widget.personaCoverEmoji,
-        coverColor: _coverColor ?? widget.personaCoverColor,
-      );
-      _applyBootstrapData(data);
-
-      if (_bond == null || data['persona'] == null) {
+        // 旧服务端无 /chat/meta 时回退 bootstrap
         try {
-          final persona = await api.getPersona(s.userId, widget.personaId);
-          _applyPersonaDetail(persona);
-        } catch (_) {/* ignore */}
+          data = await api.getChatBootstrap(
+            userId: s.userId,
+            personaId: widget.personaId,
+            limit: 30,
+          );
+        } catch (_) {
+          data = await api.getChat(
+            userId: s.userId,
+            personaId: widget.personaId,
+            limit: 30,
+            seedGreeting: false,
+          );
+        }
       }
 
+      _applyBootstrapData(data);
       if (mounted) {
         setState(() {
           _historyLoading = false;
@@ -516,8 +731,26 @@ class _ChatPageState extends State<ChatPage> {
         _maybeApplyInitialDraft();
       }
 
-      // 开场白落库不阻塞首屏；有历史时几乎立即返回
-      unawaited(_maybeSeedGreeting(api, s));
+      s.setChatBootstrapCache(widget.personaId, data);
+      unawaited(
+        ChatLocalStore.instance.saveBootstrap(
+          s.userId,
+          widget.personaId,
+          data,
+          personaName: widget.personaName,
+          oneLiner: _oneLiner ?? widget.personaOneLiner,
+          coverUrl: _coverUrl ?? widget.personaCoverUrl,
+          coverEmoji: _coverEmoji ?? widget.personaCoverEmoji,
+          coverColor: _coverColor ?? widget.personaCoverColor,
+        ),
+      );
+
+      final seeded = data['seeded'] == true;
+      if (!seeded && _messages.isEmpty) {
+        unawaited(_maybeSeedGreeting(api, s));
+      } else {
+        _markGreetingOnlyFromMessages();
+      }
     } catch (e) {
       _error = apiErrorMessage(e);
       if (mounted) {
@@ -526,6 +759,16 @@ class _ChatPageState extends State<ChatPage> {
           _historyRefreshing = false;
         });
       }
+    }
+  }
+
+  void _markGreetingOnlyFromMessages() {
+    if (_messages.length == 1 &&
+        _messages.first.isAssistant &&
+        (_greetingText == null ||
+            _messages.first.text.trim() == _greetingText)) {
+      _greetingOnly = true;
+      if (mounted) setState(() {});
     }
   }
 
@@ -540,13 +783,16 @@ class _ChatPageState extends State<ChatPage> {
     final color = p['cover_color'] as String?;
     if (color != null && color.isNotEmpty) _coverColor = color;
     final bgKey = p['background_key'] as String?;
-    if (bgKey != null && bgKey.isNotEmpty) _backgroundKey = bgKey;
+    _backgroundKey = (bgKey != null && bgKey.isNotEmpty) ? bgKey : _backgroundKey;
     final bgUrl = p['background_url'] as String?;
-    if (bgUrl != null && bgUrl.isNotEmpty) _backgroundUrl = bgUrl;
+    // 没有专用背景时清空，ChatBackdrop 会用封面
+    _backgroundUrl = (bgUrl != null && bgUrl.isNotEmpty) ? bgUrl : null;
     final g = '${p['greeting'] ?? ''}'.trim();
     _greetingText = g.isNotEmpty ? g : null;
     final vp = '${p['voice_profile_id'] ?? ''}'.trim();
     if (vp.isNotEmpty) _voiceProfileId = vp;
+    final cv = '${p['cosyvoice_voice'] ?? ''}'.trim();
+    if (cv.isNotEmpty) _cosyvoiceVoice = cv;
   }
 
   void _applyPersonaDetail(PersonaDetail persona) {
@@ -570,6 +816,7 @@ class _ChatPageState extends State<ChatPage> {
     final g = persona.greeting?.trim();
     _greetingText = (g != null && g.isNotEmpty) ? g : null;
     _voiceProfileId = persona.voiceProfileId;
+    _cosyvoiceVoice = persona.cosyvoiceVoice;
   }
 
   Future<void> _maybeSeedGreeting(ApiClient api, AppState s) async {
@@ -703,6 +950,25 @@ class _ChatPageState extends State<ChatPage> {
     unawaited(run(4));
   }
 
+  void _onInputFocus() {
+    if (_focus.hasFocus) _scrollToBottomAfterKeyboard();
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!mounted) return;
+    if (MediaQuery.viewInsetsOf(context).bottom > 0 && _focus.hasFocus) {
+      _scrollToBottomAfterKeyboard();
+    }
+  }
+
+  void _scrollToBottomAfterKeyboard() {
+    Future<void>.delayed(const Duration(milliseconds: 80), () {
+      if (mounted) _scrollToBottom(force: true);
+    });
+  }
+
   void _applyBond(dynamic raw) {
     if (raw is! Map) return;
     final m = Map<String, dynamic>.from(raw);
@@ -727,6 +993,77 @@ class _ChatPageState extends State<ChatPage> {
       quickRepliesExtra: cur.quickRepliesExtra,
     );
     _maybeAnnounceStageUp(prevStage, _bond);
+  }
+
+  /// 本窗口随机抽一轮：回复是一条语音，不是文字。与自动朗读无关。
+  bool _wantRandomVoiceTts(AppState s) {
+    if (!_hasTtsVoice) return false;
+    return _voicePlanner.markUserSent();
+  }
+
+  bool _wantAutoPlayVoice(AppState s) {
+    if (s.user?.nightMode ?? false) return false;
+    return s.autoTts;
+  }
+
+  Future<void> _persistVoicePlanner() async {
+    if (!mounted) return;
+    final s = AppStateScope.of(context);
+    await _voicePlanner.save(userId: s.userId, scopeId: widget.personaId);
+  }
+
+  /// 随机语音条：整段合成一条语音，界面只留语音条。
+  Future<void> _finishVoiceBar({
+    required AppState s,
+    required String messageId,
+    required String text,
+  }) async {
+    final body = text.trim();
+    if (body.isEmpty) return;
+    _voiceBarIds.add(messageId);
+    if (mounted) {
+      setState(() => _ttsLoadingIds.add(messageId));
+    }
+    try {
+      final data = await s.api().chatTts(
+        userId: s.userId,
+        personaId: widget.personaId,
+        messageId: messageId,
+        sessionId: _sessionId,
+        text: body,
+      );
+      final url = '${data['audio_url'] ?? ''}'.trim();
+      if (!mounted) return;
+      if (url.isNotEmpty) {
+        _messageAudioUrls[messageId] = url;
+      }
+      setState(() => _ttsLoadingIds.remove(messageId));
+      unawaited(_persistLocalSnapshot());
+      final night = s.user?.nightMode ?? false;
+      if (url.isNotEmpty && !night) {
+        final abs = resolvePersonaCoverUrl(s.baseUrl, url) ?? url;
+        await _playAbsAudioWait(abs, messageId);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _ttsLoadingIds.remove(messageId));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(apiErrorMessage(e))),
+      );
+    }
+  }
+
+  Future<void> _playVoiceBar(ChatMessage m) async {
+    if (_ttsLoadingIds.contains(m.id)) return;
+    final existing = (_messageAudioUrls[m.id] ?? '').trim();
+    if (existing.isNotEmpty) {
+      final s = AppStateScope.of(context);
+      final abs = resolvePersonaCoverUrl(s.baseUrl, existing) ?? existing;
+      await _playAbsAudioWait(abs, m.id);
+      return;
+    }
+    final s = AppStateScope.of(context);
+    await _finishVoiceBar(s: s, messageId: m.id, text: m.text);
   }
 
   void _maybeAnnounceStageUp(String? prevStage, BondDto? next) {
@@ -767,7 +1104,7 @@ class _ChatPageState extends State<ChatPage> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      next.stageLabel,
+                      BondDisplay.stageUpTitle(next.stage),
                       style: const TextStyle(
                         color: Color(0xFFB8D4B8),
                         fontSize: 22,
@@ -776,7 +1113,7 @@ class _ChatPageState extends State<ChatPage> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      '亲密值 ${next.bond}',
+                      BondDisplay.progressHint(next.progressInStage),
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: 0.65),
@@ -926,7 +1263,6 @@ class _ChatPageState extends State<ChatPage> {
         _applyBackendChunks(
           replyId,
           _chunksFromChatPayload(Map<String, dynamic>.from(data)),
-          stagger: true,
         );
       }
     } catch (e) {
@@ -975,17 +1311,38 @@ class _ChatPageState extends State<ChatPage> {
     _scrollToBottom();
 
     final preferStream = s.useStream;
+    final voiceBar = _wantRandomVoiceTts(s);
+    final autoRead = !voiceBar && _hasTtsVoice && _wantAutoPlayVoice(s);
+    unawaited(_persistVoicePlanner());
 
     try {
       if (preferStream) {
-        await _sendStream(api, s, trimmed);
+        await _sendStream(
+          api,
+          s,
+          trimmed,
+          voiceBar: voiceBar,
+          autoRead: autoRead,
+        );
       } else {
-        await _sendJson(api, s, trimmed);
+        await _sendJson(
+          api,
+          s,
+          trimmed,
+          voiceBar: voiceBar,
+          autoRead: autoRead,
+        );
       }
     } catch (e) {
       if (preferStream) {
         try {
-          await _sendJson(api, s, trimmed);
+          await _sendJson(
+            api,
+            s,
+            trimmed,
+            voiceBar: voiceBar,
+            autoRead: autoRead,
+          );
         } catch (e2) {
           _showSendError(e2);
         }
@@ -1014,6 +1371,7 @@ class _ChatPageState extends State<ChatPage> {
       fromUser: fromUser,
       totalMessages: _previewTotal(),
     );
+    _markRead();
   }
 
   void _showSendError(Object e) {
@@ -1042,12 +1400,19 @@ class _ChatPageState extends State<ChatPage> {
     return mid.isEmpty ? null : mid;
   }
 
-  Future<void> _sendJson(ApiClient api, AppState s, String trimmed) async {
+  Future<void> _sendJson(
+    ApiClient api,
+    AppState s,
+    String trimmed, {
+    bool voiceBar = false,
+    bool autoRead = false,
+  }) async {
     final data = await api.chat(
       userId: s.userId,
       personaId: widget.personaId,
       sessionId: _sessionId,
       message: trimmed,
+      voiceBar: voiceBar,
     );
     _sessionId = data['session_id'] as String? ?? _sessionId;
     final emo = EmotionDto.fromJson(
@@ -1061,9 +1426,8 @@ class _ChatPageState extends State<ChatPage> {
     final reply = '${data['reply'] ?? ''}';
     final replyId = _serverMessageId(data) ?? const Uuid().v4();
     if (!mounted) return;
-    final hasVoice = (_voiceProfileId ?? '').trim().isNotEmpty &&
-        reply.trim().isNotEmpty;
-    final autoVoice = s.autoTts && hasVoice;
+    if (voiceBar) _voiceBarIds.add(replyId);
+    if (autoRead) _autoReadMsgIds.add(replyId);
     setState(() {
       _messages.add(
         ChatMessage.assistant(
@@ -1073,38 +1437,44 @@ class _ChatPageState extends State<ChatPage> {
         ),
       );
     });
-    if (mounted && reply.trim().isNotEmpty) {
+    if (voiceBar && reply.trim().isNotEmpty) {
+      _pushPreview('[语音]', fromUser: false, msgId: replyId);
+      unawaited(_finishVoiceBar(s: s, messageId: replyId, text: reply));
+    } else if (mounted && reply.trim().isNotEmpty) {
       final chunks = _chunksFromChatPayload(Map<String, dynamic>.from(data));
       if (chunks.isNotEmpty) {
-        _applyBackendChunks(
-          replyId,
-          chunks,
-          stagger: true,
-          revealAll: false,
-        );
+        _applyBackendChunks(replyId, chunks);
       }
-      if (autoVoice) {
+      _pushPreview(reply, fromUser: false, msgId: replyId);
+      if (autoRead) {
         unawaited(_synthSegsInOrder(replyId));
       }
     }
-    _pushPreview(reply, fromUser: false, msgId: replyId);
     await _refreshBond();
     unawaited(_persistLocalSnapshot());
+    unawaited(_pollSceneFollowups());
   }
 
-  Future<void> _sendStream(ApiClient api, AppState s, String trimmed) async {
+  Future<void> _sendStream(
+    ApiClient api,
+    AppState s,
+    String trimmed, {
+    bool voiceBar = false,
+    bool autoRead = false,
+  }) async {
     var assistantId = const Uuid().v4();
     var assembled = '';
-    final wantTts =
-        s.autoTts && (_voiceProfileId ?? '').trim().isNotEmpty;
+    if (voiceBar) _voiceBarIds.add(assistantId);
+    if (autoRead) _autoReadMsgIds.add(assistantId);
     setState(() {
       _messages.add(
         ChatMessage.assistant(
           id: assistantId,
-          text: '…',
+          text: voiceBar ? '' : '…',
           senderName: widget.personaName,
         ),
       );
+      if (voiceBar) _ttsLoadingIds.add(assistantId);
     });
     void adoptServerId(String serverId) {
       final sid = serverId.trim();
@@ -1117,14 +1487,11 @@ class _ChatPageState extends State<ChatPage> {
         setState(() {
           _messages[idx] = ChatMessage.assistant(
             id: assistantId,
-            text: wantTts
-                ? (keep.isEmpty ? '…' : keep)
-                : (assembled.isEmpty ? '…' : assembled),
+            text: voiceBar ? keep : (assembled.isEmpty ? '…' : assembled),
             senderName: widget.personaName,
           );
         });
       }
-      // 迁移本地音频缓存键
       final audio = _messageAudioUrls.remove(oldId);
       if (audio != null) _messageAudioUrls[assistantId] = audio;
       final chunks = _messageTtsChunks.remove(oldId);
@@ -1133,6 +1500,8 @@ class _ChatPageState extends State<ChatPage> {
       if (segs != null) _messageSegs[assistantId] = segs;
       final vis = _segVisibleCount.remove(oldId);
       if (vis != null) _segVisibleCount[assistantId] = vis;
+      if (_voiceBarIds.remove(oldId)) _voiceBarIds.add(assistantId);
+      if (_autoReadMsgIds.remove(oldId)) _autoReadMsgIds.add(assistantId);
       if (_ttsQueueMsgId == oldId) _ttsQueueMsgId = assistantId;
       final pending = _pendingRevealText.remove(oldId);
       if (pending != null) _pendingRevealText[assistantId] = pending;
@@ -1140,7 +1509,7 @@ class _ChatPageState extends State<ChatPage> {
       if (_playingMsgId == oldId) _playingMsgId = assistantId;
     }
 
-    if (wantTts) {
+    if (autoRead) {
       await _audioPlayer.stop();
       _resetTtsQueue(assistantId);
     }
@@ -1150,16 +1519,12 @@ class _ChatPageState extends State<ChatPage> {
       personaId: widget.personaId,
       sessionId: _sessionId,
       message: trimmed,
-      ttsEnabled: wantTts,
+      ttsEnabled: autoRead,
+      voiceBar: voiceBar,
       onMessageId: adoptServerId,
       onTtsChunk: (seq, url, text, pending, error) {
+        if (voiceBar) return;
         gotTtsChunks = true;
-        // 先锁可见段数，再 upsert（避免 setState 时 visible 为空→闪出全文/全段）
-        final map = _messageSegs.putIfAbsent(assistantId, () => <int, _TtsSeg>{});
-        final willBeNew = !map.containsKey(seq);
-        if (willBeNew && !_segVisibleCount.containsKey(assistantId)) {
-          _segVisibleCount[assistantId] = 1;
-        }
         _upsertSeg(
           assistantId,
           seq,
@@ -1169,7 +1534,7 @@ class _ChatPageState extends State<ChatPage> {
           error: error,
           rebuild: false,
         );
-        _onBackendSegArrived(assistantId, seq);
+        _showAllSegs(assistantId);
         if (url.trim().isNotEmpty) {
           _enqueueTtsChunk(assistantId, seq, url, text);
         }
@@ -1186,20 +1551,16 @@ class _ChatPageState extends State<ChatPage> {
         _emotionLabel = emo.label ?? _emotionLabel;
         _applyBond(finalPayload['bond']);
         _applyRecalled(finalPayload['recalled']);
+        if (voiceBar) return;
         final chunks = _chunksFromChatPayload(finalPayload);
         if (chunks.isNotEmpty && _orderedSegs(assistantId).isEmpty) {
-          _applyBackendChunks(
-            assistantId,
-            chunks,
-            stagger: true,
-            revealAll: false,
-          );
+          _applyBackendChunks(assistantId, chunks);
         }
       },
     )) {
       assembled += token;
-      // 已有后端分段 / 自动朗读：不写全文进单气泡
-      if (gotTtsChunks || wantTts) continue;
+      // 分段气泡或语音条都不把全文写进单气泡
+      if (voiceBar || gotTtsChunks || autoRead) continue;
       final idx = _messages.indexWhere((m) => m.id == assistantId);
       if (idx >= 0 && mounted) {
         setState(() {
@@ -1212,7 +1573,7 @@ class _ChatPageState extends State<ChatPage> {
         _scrollToBottom();
       }
     }
-    if (assembled.isEmpty && mounted) {
+    if (assembled.isEmpty && mounted && !voiceBar) {
       final idx = _messages.indexWhere((m) => m.id == assistantId);
       if (idx >= 0) {
         setState(() {
@@ -1224,35 +1585,41 @@ class _ChatPageState extends State<ChatPage> {
         });
       }
     } else if (assembled.isNotEmpty) {
-      _pushPreview(assembled, fromUser: false, msgId: assistantId);
-      if (mounted) {
-        if (gotTtsChunks) {
-          // 只同步全文到消息（供预览/复制），展示仍只看 visible 段
-          final idx = _messages.indexWhere((m) => m.id == assistantId);
-          if (idx >= 0) {
-            _messages[idx] = ChatMessage.assistant(
-              id: assistantId,
-              text: assembled,
-              senderName: widget.personaName,
-            );
+      if (voiceBar) {
+        final idx = _messages.indexWhere((m) => m.id == assistantId);
+        if (idx >= 0) {
+          _messages[idx] = ChatMessage.assistant(
+            id: assistantId,
+            text: assembled,
+            senderName: widget.personaName,
+          );
+        }
+        _pushPreview('[语音]', fromUser: false, msgId: assistantId);
+        if (mounted) setState(() {});
+        unawaited(_finishVoiceBar(s: s, messageId: assistantId, text: assembled));
+      } else {
+        _pushPreview(assembled, fromUser: false, msgId: assistantId);
+        if (mounted) {
+          if (gotTtsChunks) {
+            final idx = _messages.indexWhere((m) => m.id == assistantId);
+            if (idx >= 0) {
+              _messages[idx] = ChatMessage.assistant(
+                id: assistantId,
+                text: assembled,
+                senderName: widget.personaName,
+              );
+            }
+            _showAllSegs(assistantId);
+            if (mounted) setState(() {});
+          } else {
+            _setAssistantBubble(assistantId, assembled);
           }
-          final n = _orderedSegs(assistantId).length;
-          _segVisibleCount.putIfAbsent(assistantId, () => 1);
-          if (n > (_segVisibleCount[assistantId] ?? 1)) {
-            unawaited(_staggerRevealSegs(assistantId, n));
-          }
-          if (wantTts) {
-            _ttsRevealFull = assembled;
-            _ttsRevealMsgId = assistantId;
-          }
-          if (mounted) setState(() {});
-        } else {
-          _setAssistantBubble(assistantId, assembled);
         }
       }
     }
     await _refreshBond();
     unawaited(_persistLocalSnapshot());
+    unawaited(_pollSceneFollowups());
   }
 
   void _openMore() {
@@ -1352,49 +1719,6 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
-  String get _initial {
-    final n = widget.personaName.trim();
-    return n.isNotEmpty ? n.substring(0, 1) : '角';
-  }
-
-  /// 与「我的」同一套：色块 + emoji 预设 / 上传图
-  Widget _userAvatar({double radius = 18}) {
-    final s = AppStateScope.of(context);
-    final u = s.user;
-    return UserAvatar(
-      emoji: u?.avatarEmoji ?? '🌙',
-      colorHex: u?.avatarColor ?? '#5B7C99',
-      imageUrl: s.absoluteAvatarUrl(u?.avatarUrl),
-      radius: radius,
-    );
-  }
-
-  Color get _personaCoverBg {
-    final hex = (_coverColor ?? '#7B6CF6').replaceFirst('#', '');
-    try {
-      return Color(int.parse(hex, radix: 16) + 0xFF000000);
-    } catch (_) {
-      return AppColors.primary;
-    }
-  }
-
-  String get _personaFallbackLabel {
-    if (_coverEmoji != null && _coverEmoji!.isNotEmpty) return _coverEmoji!;
-    return _initial;
-  }
-
-  /// 角色侧：封面图优先，否则 coverEmoji / 名字首字
-  Widget _personaAvatar({double radius = 18}) {
-    final s = AppStateScope.of(context);
-    return PersonaCoverAvatar(
-      baseUrl: s.baseUrl,
-      coverUrl: _coverUrl,
-      fallbackColor: _personaCoverBg,
-      fallbackLabel: _personaFallbackLabel,
-      radius: radius,
-    );
-  }
-
   bool _canRegenerate(int index) {
     if (_sending || _greetingOnly) return false;
     if (index < 0 || index >= _messages.length) return false;
@@ -1461,6 +1785,14 @@ class _ChatPageState extends State<ChatPage> {
         );
       });
       _pushPreview(reply, fromUser: false, msgId: replyId);
+      final chunks = _chunksFromChatPayload(Map<String, dynamic>.from(data));
+      if (chunks.isNotEmpty) {
+        _applyBackendChunks(replyId, chunks);
+      }
+      if (_hasTtsVoice && _wantAutoPlayVoice(s) && reply.trim().isNotEmpty) {
+        _autoReadMsgIds.add(replyId);
+        unawaited(_synthSegsInOrder(replyId));
+      }
     } catch (e) {
       if (!mounted) return;
       // 失败时重新拉历史，避免本地与服务器不一致
@@ -1477,6 +1809,7 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _openMessageActions(ChatMessage m, int index) async {
     final canRegen = _canRegenerate(index);
+    final isMemory = _chatExtras[m.id]?.isMemory == true;
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppColors.bgDarkElevated,
@@ -1513,6 +1846,15 @@ class _ChatPageState extends State<ChatPage> {
                   _quoteMessage(m);
                 },
               ),
+              if (!m.isUser && !isMemory)
+                ListTile(
+                  leading: const Icon(Icons.push_pin_outlined),
+                  title: const Text('记住这一刻'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _rememberMessage(m);
+                  },
+                ),
               if (canRegen)
                 ListTile(
                   leading: const Icon(Icons.refresh),
@@ -1543,31 +1885,23 @@ class _ChatPageState extends State<ChatPage> {
         m.text.trim().isNotEmpty &&
         m.text.trim() != '[图片]' &&
         !pending;
+    final voiceBar = !isUser && _voiceBarIds.contains(m.id);
     final segs = _orderedSegs(m.id);
-    // 有后端分段时：只按可见段画气泡；缺省先露 1 条（避免先闪全文/全段）
-    final visibleN = (_segVisibleCount[m.id] ?? (segs.isEmpty ? 0 : 1))
+    final visibleN = (_segVisibleCount[m.id] ?? (segs.isEmpty ? 0 : segs.length))
         .clamp(0, segs.length);
     final shownSegs = segs.take(visibleN).toList();
-    final hasVoice = !isUser &&
-        showText &&
-        !sticker &&
-        (_voiceProfileId ?? '').trim().isNotEmpty;
-    // 有后端段就走分段气泡（哪怕暂时只露 1 条），禁止用 m.text 全文冒充单气泡
-    final useSegs = !isUser && segs.isNotEmpty && shownSegs.isNotEmpty;
-    // 关自动朗读时后端仍可能推纯文本段；此时段内无音频芯片，需在顶部保留手动播放
-    final anySegAudioUi = useSegs && shownSegs.any(_segHasAudioUi);
-    final showTopPlay =
-        hasVoice && m.text.trim() != '…' && (!useSegs || !anySegAudioUi);
+    final hasVoice = !isUser && !voiceBar && !sticker && _hasTtsVoice;
+    final useSegs = !isUser && !voiceBar && segs.isNotEmpty && shownSegs.isNotEmpty;
     final Widget textBubble;
-    if (sticker) {
-      textBubble = Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: isUser ? AppColors.primary : Colors.white.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Text(m.text.trim(), style: const TextStyle(fontSize: 40, height: 1.1)),
+    if (voiceBar) {
+      textBubble = VoicePlayChip(
+        playing: _playingMsgId == m.id,
+        loading: _ttsLoadingIds.contains(m.id),
+        label: '语音',
+        onTap: () => unawaited(_playVoiceBar(m)),
       );
+    } else if (sticker) {
+      textBubble = _ImmersiveBubble(text: m.text.trim(), isUser: isUser, emoji: true);
     } else if (!showText) {
       textBubble = const SizedBox.shrink();
     } else if (useSegs) {
@@ -1576,23 +1910,46 @@ class _ChatPageState extends State<ChatPage> {
         children: [
           for (var i = 0; i < shownSegs.length; i++) ...[
             if (i > 0) const SizedBox(height: 10),
-            // 仅文本段（关自动朗读）不显示「重试」芯片；有音频/合成中/失败才显示
-            if (hasVoice && _segHasAudioUi(shownSegs[i]))
-              _segAudioChip(m.id, shownSegs[i]),
+            if (hasVoice) _segAudioChip(m.id, shownSegs[i]),
             _assistantSentenceBubble(shownSegs[i].text),
           ],
         ],
       );
     } else {
-      textBubble = ChatBubble(
-        message: m,
-        showAvatar: false,
-        animate: animate,
-        enableCopy: false,
-        onLongPress: () => _openMessageActions(m, index),
+      textBubble = Column(
+        crossAxisAlignment:
+            isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          if (hasVoice && m.text.trim() != '…')
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: VoicePlayChip(
+                playing: _messageTtsPlaying(m.id),
+                loading: _messageTtsLoading(m.id),
+                label: '语音',
+                onTap: () => unawaited(_playMessageTts(m)),
+              ),
+            ),
+          _ImmersiveBubble(text: m.text, isUser: isUser),
+        ],
       );
     }
     final mediaChildren = <Widget>[];
+    final extra = _chatExtras[m.id];
+    if (extra?.isSceneImage == true && extra!.sceneTitle.isNotEmpty) {
+      mediaChildren.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text(
+            extra.sceneTitle,
+            style: TextStyle(
+              fontSize: 11,
+              color: AppColors.accentPink.withValues(alpha: 0.9),
+            ),
+          ),
+        ),
+      );
+    }
     if (pending) {
       mediaChildren.add(const _ImageGenPlaceholder());
       if (showText || sticker) mediaChildren.add(const SizedBox(height: 6));
@@ -1639,53 +1996,6 @@ class _ChatPageState extends State<ChatPage> {
           isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
         ...mediaChildren,
-        if (showTopPlay)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 4),
-            child: InkWell(
-              onTap: () => unawaited(_playMessageTts(m)),
-              borderRadius: BorderRadius.circular(999),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (_ttsLoadingIds.contains(m.id))
-                      const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white70,
-                        ),
-                      )
-                    else
-                      Icon(
-                        _playingMsgId == m.id
-                            ? Icons.volume_up_rounded
-                            : Icons.volume_up_outlined,
-                        size: 16,
-                        color: Colors.white70,
-                      ),
-                    const SizedBox(width: 4),
-                    Text(
-                      _ttsLoadingIds.contains(m.id)
-                          ? '生成中'
-                          : (_playingMsgId == m.id ? '播放中' : '语音'),
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
         textBubble,
       ],
     );
@@ -1696,15 +2006,7 @@ class _ChatPageState extends State<ChatPage> {
             isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          if (!isUser) ...[
-            _personaAvatar(radius: 18),
-            const SizedBox(width: 8),
-          ],
           Flexible(child: bubble),
-          if (isUser) ...[
-            const SizedBox(width: 8),
-            _userAvatar(radius: 18),
-          ],
         ],
       ),
     );
@@ -1769,49 +2071,20 @@ class _ChatPageState extends State<ChatPage> {
     return out;
   }
 
-  void _applyBackendChunks(
-    String msgId,
-    List<Map<String, dynamic>> chunks, {
-    required bool stagger,
-    bool revealAll = false,
-  }) {
-    if (chunks.isEmpty) return;
-    if (!_segVisibleCount.containsKey(msgId)) {
-      _segVisibleCount[msgId] = revealAll ? chunks.length : 1;
-    }
-    _ingestTtsChunks(msgId, chunks);
+  void _showAllSegs(String msgId) {
     final n = _orderedSegs(msgId).length;
     if (n <= 0) return;
-    if (revealAll || !stagger || n <= 1) {
-      _segVisibleCount[msgId] = n;
-    } else {
-      _segVisibleCount[msgId] = 1;
-      unawaited(_staggerRevealSegs(msgId, n));
-    }
+    _segVisibleCount[msgId] = n;
     if (mounted) setState(() {});
   }
 
-  void _onBackendSegArrived(String msgId, int seq) {
-    // 气泡一律约 1s 逐条露；自动朗读只负责播音频，不一次掀开全部气泡
-    final total = _orderedSegs(msgId).length;
-    if (total <= 0) return;
-    if (!_segVisibleCount.containsKey(msgId)) {
-      _segVisibleCount[msgId] = 1;
-    }
-    if (total > (_segVisibleCount[msgId] ?? 1)) {
-      unawaited(_staggerRevealSegs(msgId, total));
-    }
-    if (mounted) setState(() {});
-  }
-
-  void _revealSegsAtLeast(String msgId, int count) {
-    final total = _orderedSegs(msgId).length;
-    if (total <= 0) return;
-    final next = count.clamp(1, total);
-    final cur = _segVisibleCount[msgId] ?? 1;
-    if (next <= cur) return;
-    _segVisibleCount[msgId] = next;
-    if (mounted) setState(() {});
+  void _applyBackendChunks(
+    String msgId,
+    List<Map<String, dynamic>> chunks,
+  ) {
+    if (chunks.isEmpty) return;
+    _ingestTtsChunks(msgId, chunks);
+    _showAllSegs(msgId);
   }
 
   void _upsertSeg(
@@ -1860,29 +2133,6 @@ class _ChatPageState extends State<ChatPage> {
     if (rebuild && mounted) setState(() {});
   }
 
-  Future<void> _staggerRevealSegs(String msgId, int total) async {
-    final gen = (_segStaggerGen[msgId] ?? 0) + 1;
-    _segStaggerGen[msgId] = gen;
-    var n = _segVisibleCount[msgId] ?? 1;
-    while (n < total) {
-      await Future<void>.delayed(const Duration(milliseconds: 1000));
-      if (!mounted) return;
-      if (_segStaggerGen[msgId] != gen) return;
-      final liveTotal = _orderedSegs(msgId).length;
-      final target = total < liveTotal ? liveTotal : total;
-      if ((_segVisibleCount[msgId] ?? 0) >= target) return;
-      n = (_segVisibleCount[msgId] ?? 1) + 1;
-      if (n > target) return;
-      setState(() => _segVisibleCount[msgId] = n);
-      _scrollToBottom();
-    }
-    if (!mounted || _segStaggerGen[msgId] != gen) return;
-    final segs = _orderedSegs(msgId);
-    if (segs.isNotEmpty) {
-      _pushPreview(segs.last.text, fromUser: false, msgId: msgId);
-    }
-  }
-
   Future<void> _synthSegsInOrder(String msgId) async {
     final s = AppStateScope.of(context);
     final segs = _orderedSegs(msgId);
@@ -1911,6 +2161,7 @@ class _ChatPageState extends State<ChatPage> {
         _upsertSeg(msgId, seg.seq, text: seg.text, pending: false, error: true);
       }
     }
+    unawaited(_persistLocalSnapshot());
   }
 
   List<_TtsSeg> _orderedSegs(String msgId) {
@@ -1949,6 +2200,7 @@ class _ChatPageState extends State<ChatPage> {
           );
       final url = '${data['audio_url'] ?? ''}'.trim();
       _upsertSeg(msgId, seg.seq, text: seg.text, url: url, pending: false, error: url.isEmpty);
+      unawaited(_persistLocalSnapshot());
       if (url.isNotEmpty) {
         final abs = resolvePersonaCoverUrl(s.baseUrl, url) ?? url;
         await _playAbsAudioWait(abs, _segPlayId(msgId, seg.seq));
@@ -1963,8 +2215,15 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  bool _segHasAudioUi(_TtsSeg seg) {
-    return seg.pending || seg.error || seg.url.trim().isNotEmpty;
+  bool _messageTtsLoading(String msgId) {
+    if (_ttsLoadingIds.contains(msgId)) return true;
+    return _orderedSegs(msgId).any((s) => s.pending);
+  }
+
+  bool _messageTtsPlaying(String msgId) {
+    if (_playingMsgId == msgId) return true;
+    return _orderedSegs(msgId)
+        .any((s) => _playingMsgId == _segPlayId(msgId, s.seq));
   }
 
   Widget _segAudioChip(String msgId, _TtsSeg seg) {
@@ -1976,7 +2235,7 @@ class _ChatPageState extends State<ChatPage> {
       label = '生成中';
     } else if (playing) {
       label = '播放中';
-    } else if (seg.error || seg.url.isEmpty) {
+    } else if (seg.error) {
       label = '重试';
     }
     return Padding(
@@ -2006,7 +2265,7 @@ class _ChatPageState extends State<ChatPage> {
                 Icon(
                   playing
                       ? Icons.volume_up_rounded
-                      : (seg.error || seg.url.isEmpty
+                      : (seg.error
                           ? Icons.refresh_rounded
                           : Icons.volume_up_outlined),
                   size: 16,
@@ -2025,21 +2284,9 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Widget _assistantSentenceBubble(String text) {
-    final body = text.trim().isEmpty ? '…' : text.trim();
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Text(
-        body,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 15,
-          height: 1.45,
-        ),
-      ),
+    return _ImmersiveBubble(
+      text: text.trim().isEmpty ? '…' : text.trim(),
+      isUser: false,
     );
   }
 
@@ -2096,6 +2343,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   void _enqueueTtsChunk(String msgId, int seq, String url, [String text = '']) {
+    if (!_autoReadMsgIds.contains(msgId)) return;
     if (url.trim().isEmpty) return;
     _ttsQueueMsgId = msgId;
     (_messageTtsChunks[msgId] ??= {})[seq] = url;
@@ -2118,8 +2366,6 @@ class _ChatPageState extends State<ChatPage> {
         _ttsExpectSeq++;
         final abs = resolvePersonaCoverUrl(baseUrl, url) ?? url;
         if (!mounted) return;
-        // 播到哪句，至少露到哪句（不拖慢音频；避免先全文后拆开）
-        _revealSegsAtLeast(playId, seq + 1);
         if (_orderedSegs(playId).isEmpty) {
           _appendSpokenText(playId, piece);
         }
@@ -2185,23 +2431,24 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _playMessageTts(ChatMessage m) async {
     if (!m.isAssistant) return;
+    if (_voiceBarIds.contains(m.id)) {
+      await _playVoiceBar(m);
+      return;
+    }
     final text = m.text.trim();
     if (text.isEmpty || text.startsWith('[图片]')) return;
-    final voiceId = (_voiceProfileId ?? '').trim();
-    if (voiceId.isEmpty) {
+    if (!_hasTtsVoice) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('该角色尚未绑定音色')),
       );
       return;
     }
-    if (_orderedSegs(m.id).isNotEmpty) {
-      unawaited(_synthSegsInOrder(m.id));
-      return;
+    _autoReadMsgIds.add(m.id);
+    if (_orderedSegs(m.id).isEmpty) {
+      _upsertSeg(m.id, 0, text: text, pending: true, rebuild: false);
+      _segVisibleCount[m.id] = 1;
     }
-    // 无后端分段：整段一次合成
-    _upsertSeg(m.id, 0, text: text, pending: true, rebuild: false);
-    _segVisibleCount[m.id] = 1;
     unawaited(_synthSegsInOrder(m.id));
   }
 
@@ -2340,6 +2587,7 @@ class _ChatPageState extends State<ChatPage> {
         }
       });
       _pushPreview('[图片] $prompt', fromUser: true);
+      unawaited(_pollSceneFollowups());
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -2355,6 +2603,112 @@ class _ChatPageState extends State<ChatPage> {
       if (mounted) setState(() => _sending = false);
       _scrollToBottom();
     }
+  }
+
+  ChatMessage? _lastAssistantMessage() {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      if (!_messages[i].isUser) return _messages[i];
+    }
+    return null;
+  }
+
+  Future<void> _listenToHer() async {
+    final last = _lastAssistantMessage();
+    if (last != null) {
+      await _playMessageTts(last);
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('等她回一句，或先打个招呼')),
+    );
+  }
+
+  bool _callQuotaChecking = false;
+
+  /// 拨号前先查额度：免费时长用完时先说清要扣星尘，别让用户进了通话页才失败。
+  Future<bool> _confirmCallQuota(String token) async {
+    final s = AppStateScope.of(context);
+    Map<String, dynamic>? quota;
+    try {
+      quota = await s.api().getCallQuota(accessToken: token);
+    } catch (_) {
+      // 预检失败不阻断拨号，仍由服务端 assert_call_allowed 把关
+      return true;
+    }
+    if (!mounted) return false;
+
+    if (quota['enabled'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('语音通话暂未开放')),
+      );
+      return false;
+    }
+
+    int asInt(Object? v) => v is int ? v : int.tryParse('$v') ?? 0;
+    final remaining = asInt(quota['free_seconds_remaining']);
+    if (remaining > 0) return true;
+
+    final perMin = asInt(quota['stardust_per_minute']);
+    if (perMin <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('免费通话时长已用完')),
+      );
+      return false;
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('免费时长已用完'),
+        content: Text('继续通话将按 $perMin 星尘/分钟扣费，要现在拨打吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('先不打'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('继续拨打'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _openVoiceCall() async {
+    final s = AppStateScope.of(context);
+    final token = s.accessToken;
+    if (token == null || token.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先登录后再拨打语音')),
+      );
+      return;
+    }
+    if (_callQuotaChecking) return;
+    setState(() => _callQuotaChecking = true);
+    final allowed = await _confirmCallQuota(token);
+    if (mounted) setState(() => _callQuotaChecking = false);
+    if (!mounted || !allowed) return;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => VoiceCallPage(
+          personaId: widget.personaId,
+          personaName: widget.personaName,
+          sessionId: _sessionId,
+          accessToken: token,
+          baseUrl: s.baseUrl,
+          coverUrl: _coverUrl,
+          coverEmoji: _coverEmoji,
+          coverColor: _coverColor,
+          backgroundKey: _backgroundKey,
+          backgroundUrl: _backgroundUrl,
+          oneLiner: _oneLiner,
+        ),
+      ),
+    );
   }
 
   @override
@@ -2375,6 +2729,13 @@ class _ChatPageState extends State<ChatPage> {
       );
     }
 
+    final topInset = MediaQuery.paddingOf(context).top;
+    final bondLabel = _bond == null
+        ? (_emotionLabel ?? _oneLiner ?? '私聊中')
+        : BondDisplay.companionLabel(
+            stageId: _bond!.stage,
+            serverLabel: _bond!.stageLabel,
+          );
     return Stack(
       children: [
     PopScope(
@@ -2383,116 +2744,23 @@ class _ChatPageState extends State<ChatPage> {
         if (didPop) _syncPreviewOnLeave();
       },
       child: Scaffold(
+      resizeToAvoidBottomInset: true,
       backgroundColor: Colors.transparent,
-      extendBodyBehindAppBar: true,
-      appBar: AppBar(
-        backgroundColor: Colors.black.withValues(alpha: 0.25),
-        elevation: 0,
-        titleSpacing: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
-        title: Row(
-          children: [
-            _personaAvatar(radius: 18),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.personaName,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (_bond != null)
-                    _BondMiniLine(bond: _bond!)
-                  else
-                    Text(
-                      _emotionLabel ?? _oneLiner ?? '私聊中',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Colors.white.withValues(alpha: 0.55),
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: '语音通话',
-            icon: const Icon(Icons.phone_outlined),
-            onPressed: () {
-              final s = AppStateScope.of(context);
-              final token = s.accessToken;
-              if (token == null || token.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('请先登录后再拨打语音')),
-                );
-                return;
-              }
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => VoiceCallPage(
-                    personaId: widget.personaId,
-                    personaName: widget.personaName,
-                    sessionId: _sessionId,
-                    accessToken: token,
-                    baseUrl: s.baseUrl,
-                  ),
-                ),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.more_horiz),
-            onPressed: _openMore,
-          ),
-        ],
-      ),
-      body: Column(
+      body: Stack(
         children: [
-          if (_historyRefreshing)
-            const LinearProgressIndicator(
-              minHeight: 2,
-              backgroundColor: Colors.transparent,
-              color: AppColors.primaryLight,
+          Positioned.fill(
+            child: ChatBackdrop(
+              baseUrl: AppStateScope.of(context).baseUrl,
+              backgroundKey: _backgroundKey,
+              backgroundUrl: _backgroundUrl,
+              coverUrl: _coverUrl,
             ),
+          ),
+          Column(
+        children: [
           Expanded(
             child: Stack(
               children: [
-                Positioned.fill(
-                  child: _ChatBackdrop(
-                    baseUrl: AppStateScope.of(context).baseUrl,
-                    backgroundKey: _backgroundKey,
-                    backgroundUrl: _backgroundUrl,
-                    coverUrl: _coverUrl,
-                  ),
-                ),
-                Positioned(
-                  right: -20,
-                  bottom: 80,
-                  child: IgnorePointer(
-                    child: Text(
-                      _initial,
-                      style: TextStyle(
-                        fontSize: 220,
-                        height: 1,
-                        fontWeight: FontWeight.w200,
-                        color: AppColors.primaryLight.withValues(alpha: 0.06),
-                      ),
-                    ),
-                  ),
-                ),
                 if (_messages.isEmpty)
                   Stack(
                     alignment: Alignment.center,
@@ -2523,15 +2791,20 @@ class _ChatPageState extends State<ChatPage> {
                   ListView.builder(
                     controller: _scroll,
                     reverse: true,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
                     physics: const AlwaysScrollableScrollPhysics(
                       parent: BouncingScrollPhysics(),
                     ),
                     cacheExtent: 2400,
                     padding: EdgeInsets.fromLTRB(
+                      16,
                       12,
-                      16 + MediaQuery.paddingOf(context).bottom,
-                      12,
-                      MediaQuery.paddingOf(context).top + kToolbarHeight + 8,
+                      16,
+                      ChatTopBar.listTopPadding(
+                        topInset,
+                        showProgress: _historyRefreshing,
+                      ),
                     ),
                     itemCount: _messages.length +
                         (_sending &&
@@ -2577,16 +2850,54 @@ class _ChatPageState extends State<ChatPage> {
                         );
                       }
                       final mi = _messages.length - 1 - fromBottom;
+                      final msg = _messages[mi];
+                      final extra = _chatExtras[msg.id];
+                      if (extra?.isMemory == true) {
+                        final baseUrl = AppStateScope.of(context).baseUrl;
+                        final rawImg = (_messageImages[msg.id]?.isNotEmpty ?? false)
+                            ? _messageImages[msg.id]!.first
+                            : extra!.imageUrl;
+                        final imageUrl = rawImg.isNotEmpty
+                            ? (resolvePersonaCoverUrl(baseUrl, rawImg) ?? rawImg)
+                            : '';
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: SceneMemoryCard(
+                            title: extra!.sceneTitle,
+                            summary: extra.summary,
+                            imageUrl: imageUrl,
+                            onOpenImage: imageUrl.isNotEmpty
+                                ? (url) => _openImageViewer(url: url)
+                                : null,
+                          ),
+                        );
+                      }
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _bubbleRow(
-                          _messages[mi],
+                          msg,
                           index: mi,
                           animate: mi >= _messages.length - 2,
                         ),
                       );
                     },
                   ),
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: _ImmersiveChatHeader(
+                    topInset: topInset,
+                    name: widget.personaName,
+                    subtitle: bondLabel,
+                    sceneRemaining: _sceneRemaining,
+                    sceneLimit: _sceneLimit,
+                    refreshing: _historyRefreshing,
+                    onBack: () => Navigator.of(context).maybePop(),
+                    onCall: _openVoiceCall,
+                    onMore: _openMore,
+                  ),
+                ),
               ],
             ),
           ),
@@ -2604,7 +2915,7 @@ class _ChatPageState extends State<ChatPage> {
             ),
           if (_greetingOnly && !_sending)
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
               child: Row(
                 children: [
                   Expanded(
@@ -2628,12 +2939,16 @@ class _ChatPageState extends State<ChatPage> {
             focusNode: _focus,
             enabled: !_sending,
             sending: _sending,
-            hint: '输入消息...',
+            hint: '对她说…',
+            showListen: _hasTtsVoice,
+            onListen: () => unawaited(_listenToHer()),
             onGift: _sendGift,
             resolveAbsoluteUrl: (u) => AppStateScope.of(context).api().resolveUrl(u),
             onPickImage: _pickAndEditImage,
             onSubmit: _submit,
           ),
+        ],
+      ),
         ],
       ),
     ),
@@ -2653,6 +2968,93 @@ class _ChatPageState extends State<ChatPage> {
   }
 }
 
+class _ImmersiveChatHeader extends StatelessWidget {
+  const _ImmersiveChatHeader({
+    required this.topInset,
+    required this.name,
+    required this.subtitle,
+    this.sceneRemaining,
+    this.sceneLimit,
+    required this.refreshing,
+    required this.onBack,
+    required this.onCall,
+    required this.onMore,
+  });
+
+  final double topInset;
+  final String name;
+  final String subtitle;
+  final int? sceneRemaining;
+  final int? sceneLimit;
+  final bool refreshing;
+  final VoidCallback onBack;
+  final VoidCallback onCall;
+  final VoidCallback onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    return ChatTopBar(
+      topInset: topInset,
+      showProgress: refreshing,
+      child: Row(
+        children: [
+          FrostIconButton(
+            icon: Icons.arrow_back_ios_new_rounded,
+            onTap: onBack,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+                if (sceneRemaining != null &&
+                    sceneLimit != null &&
+                    sceneLimit! > 0) ...[
+                  const SizedBox(height: 4),
+                  SceneQuotaBadge(
+                    remaining: sceneRemaining,
+                    limit: sceneLimit,
+                    compact: true,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          FrostIconButton(
+            icon: Icons.phone_outlined,
+            onTap: onCall,
+            tooltip: '语音通话',
+          ),
+          const SizedBox(width: 6),
+          FrostIconButton(
+            icon: Icons.more_horiz,
+            onTap: onMore,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _BondMiniLine extends StatelessWidget {
   const _BondMiniLine({required this.bond});
 
@@ -2661,6 +3063,10 @@ class _BondMiniLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final progress = bond.progressInStage.clamp(0.0, 1.0);
+    final label = BondDisplay.companionLabel(
+      stageId: bond.stage,
+      serverLabel: bond.stageLabel,
+    );
     return Row(
       children: [
         Expanded(
@@ -2686,7 +3092,7 @@ class _BondMiniLine extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         Text(
-          '${bond.stageLabel} ${(progress * 100).round()}%',
+          '$label · ${BondDisplay.progressHint(progress)}',
           style: TextStyle(
             fontSize: 11,
             color: AppColors.accentPink.withValues(alpha: 0.9),
@@ -2706,6 +3112,10 @@ class _BondProgressStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final progress = bond.progressInStage.clamp(0.0, 1.0);
+    final label = BondDisplay.companionLabel(
+      stageId: bond.stage,
+      serverLabel: bond.stageLabel,
+    );
     return Material(
       color: AppColors.bgDarkElevated,
       child: Padding(
@@ -2725,7 +3135,7 @@ class _BondProgressStrip extends StatelessWidget {
                     ),
                   ),
                   child: Text(
-                    bond.stageLabel,
+                    label,
                     style: const TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
@@ -2736,7 +3146,7 @@ class _BondProgressStrip extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    '亲密 ${bond.bond} · 本阶段 ${(progress * 100).round()}%',
+                    BondDisplay.progressHint(progress),
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.white.withValues(alpha: 0.55),
@@ -2857,108 +3267,6 @@ class _RecalledMemoryStrip extends StatelessWidget {
       ),
     );
   }
-}
-
-class _ChatBackdrop extends StatelessWidget {
-  const _ChatBackdrop({
-    required this.baseUrl,
-    this.backgroundKey,
-    this.backgroundUrl,
-    this.coverUrl,
-  });
-
-  final String baseUrl;
-  final String? backgroundKey;
-  final String? backgroundUrl;
-  final String? coverUrl;
-
-  @override
-  Widget build(BuildContext context) {
-    // 优先专用背景；没有则用封面立绘，避免聊天永远同一张渐变
-    final url = resolvePersonaBackgroundUrl(baseUrl, backgroundUrl) ??
-        resolvePersonaCoverUrl(baseUrl, coverUrl);
-    if (url != null && url.isNotEmpty) {
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          AppNetworkImage(
-            url: url,
-            fit: BoxFit.cover,
-            alignment: const Alignment(0, -0.2),
-            errorWidget: (_, __, ___) =>
-                _PresetBackdrop(backgroundKey: backgroundKey),
-          ),
-          const DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Color(0x661A1A2E),
-                  Color(0xB31A1A2E),
-                  Color(0xE61A1A2E),
-                ],
-              ),
-            ),
-          ),
-          CustomPaint(painter: _VignettePainter()),
-        ],
-      );
-    }
-    return _PresetBackdrop(backgroundKey: backgroundKey);
-  }
-}
-
-class _PresetBackdrop extends StatelessWidget {
-  const _PresetBackdrop({this.backgroundKey});
-
-  final String? backgroundKey;
-
-  @override
-  Widget build(BuildContext context) {
-    Map<String, String>? preset;
-    for (final p in kBackgroundPresets) {
-      if (p['key'] == backgroundKey) {
-        preset = p;
-        break;
-      }
-    }
-    preset ??= kBackgroundPresets.first;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            parseHexColor(preset['color_from']!, fallback: 0xFF1A1A2E),
-            parseHexColor(preset['color_mid']!, fallback: 0xFF12121F),
-            parseHexColor(preset['color_to']!, fallback: 0xFF0A0A14),
-          ],
-        ),
-      ),
-      child: CustomPaint(painter: _VignettePainter()),
-    );
-  }
-}
-
-class _VignettePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final paint = Paint()
-      ..shader = RadialGradient(
-        center: const Alignment(0, -0.2),
-        radius: 1.15,
-        colors: [
-          const Color(0xFF7B6CF6).withValues(alpha: 0.16),
-          Colors.transparent,
-        ],
-      ).createShader(rect);
-    canvas.drawRect(rect, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _EmptyChatState extends StatelessWidget {
@@ -3500,6 +3808,8 @@ class _ComposerBar extends StatefulWidget {
     required this.sending,
     required this.hint,
     required this.onSubmit,
+    this.showListen = false,
+    this.onListen,
     this.onGift,
     this.resolveAbsoluteUrl,
     this.onPickImage,
@@ -3511,6 +3821,8 @@ class _ComposerBar extends StatefulWidget {
   final bool sending;
   final String hint;
   final VoidCallback onSubmit;
+  final bool showListen;
+  final VoidCallback? onListen;
   final Future<void> Function(GiftDto gift)? onGift;
   final String Function(String url)? resolveAbsoluteUrl;
   final VoidCallback? onPickImage;
@@ -3519,11 +3831,64 @@ class _ComposerBar extends StatefulWidget {
   State<_ComposerBar> createState() => _ComposerBarState();
 }
 
-class _ComposerBarState extends State<_ComposerBar> {
+class _ComposerBarState extends State<_ComposerBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _plusCtrl;
+  late final Animation<double> _plusReveal;
+  late final Animation<double> _plusTurn;
+  bool _plusOpen = false;
   bool _giftOpen = false;
   List<GiftDto>? _gifts;
   int? _stardust;
   bool _giftsLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _plusCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 320),
+    );
+    final curve = CurvedAnimation(
+      parent: _plusCtrl,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    _plusReveal = curve;
+    _plusTurn = Tween<double>(begin: 0, end: 0.125).animate(curve);
+  }
+
+  @override
+  void dispose() {
+    _plusCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _setPlusOpen(bool open) async {
+    if (open == _plusOpen) return;
+    widget.focusNode.unfocus();
+    if (open) {
+      setState(() {
+        _plusOpen = true;
+        _giftOpen = false;
+      });
+      await _plusCtrl.forward();
+    } else {
+      await _plusCtrl.reverse();
+      if (mounted) setState(() => _plusOpen = false);
+    }
+  }
+
+  Future<void> _onAction(VoidCallback? action, {bool openGift = false}) async {
+    await _setPlusOpen(false);
+    if (!mounted) return;
+    if (openGift) {
+      setState(() => _giftOpen = true);
+      await _ensureGifts();
+      return;
+    }
+    action?.call();
+  }
 
   Future<void> _ensureGifts() async {
     if (_gifts != null || _giftsLoading) return;
@@ -3549,156 +3914,129 @@ class _ComposerBarState extends State<_ComposerBar> {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.bgDark.withValues(alpha: 0.94),
-      elevation: 0,
-      child: SafeArea(
-        top: false,
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 输入框上方快捷句标签暂隐藏
-            // 亲密贴纸面板已下线，不再展示
-            if (_giftOpen)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _stardust == null ? '星尘礼物' : '星尘礼物 · 余额 $_stardust',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.white.withValues(alpha: 0.65),
-                      ),
+            SizeTransition(
+              sizeFactor: _plusReveal,
+              child: FadeTransition(
+                opacity: _plusReveal,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(32),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x88000000),
+                          blurRadius: 32,
+                          offset: Offset(0, 12),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 6),
-                    if (_giftsLoading)
-                      const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: Center(
-                          child: SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(32),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: AppColors.glassSoft,
+                            borderRadius: BorderRadius.circular(32),
+                            border: Border.all(
+                              color: AppColors.strokeStrong,
+                              width: 1.2,
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 26, 10, 22),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                _PlusAction(
+                                  icon: Icons.image_outlined,
+                                  label: '图片',
+                                  onTap: widget.enabled
+                                      ? () => unawaited(
+                                            _onAction(widget.onPickImage),
+                                          )
+                                      : null,
+                                ),
+                                _PlusAction(
+                                  icon: Icons.card_giftcard_rounded,
+                                  label: '礼物',
+                                  onTap: widget.enabled
+                                      ? () => unawaited(
+                                            _onAction(null, openGift: true),
+                                          )
+                                      : null,
+                                ),
+                                if (widget.showListen)
+                                  _PlusAction(
+                                    icon: Icons.volume_up_outlined,
+                                    label: '听她说',
+                                    onTap: widget.enabled
+                                        ? () => unawaited(
+                                              _onAction(widget.onListen),
+                                            )
+                                        : null,
+                                  ),
+                              ],
+                            ),
                           ),
                         ),
-                      )
-                    else
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final g in _gifts ?? const <GiftDto>[])
-                            InkWell(
-                              borderRadius: BorderRadius.circular(12),
-                              onTap: widget.enabled
-                                  ? () async {
-                                      await widget.onGift?.call(g);
-                                      if (mounted) {
-                                        setState(() => _giftOpen = false);
-                                      }
-                                    }
-                                  : null,
-                              child: Container(
-                                width: 72,
-                                padding: const EdgeInsets.all(6),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withValues(alpha: 0.08),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                    color: AppColors.accentPink.withValues(alpha: 0.35),
-                                  ),
-                                ),
-                                child: Column(
-                                  children: [
-                                    if (g.thumbUrl.isNotEmpty)
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(8),
-                                        child: AppNetworkImage(
-                                          url: widget.resolveAbsoluteUrl?.call(g.thumbUrl) ??
-                                              g.thumbUrl,
-                                          width: 40,
-                                          height: 40,
-                                          fit: BoxFit.contain,
-                                          placeholder: (_, __) => const SizedBox(
-                                            width: 40,
-                                            height: 40,
-                                            child: Center(
-                                              child: SizedBox(
-                                                width: 14,
-                                                height: 14,
-                                                child: CircularProgressIndicator(strokeWidth: 2),
-                                              ),
-                                            ),
-                                          ),
-                                          errorWidget: (_, __, ___) =>
-                                              const Text('🎁', style: TextStyle(fontSize: 22)),
-                                        ),
-                                      )
-                                    else
-                                      const Text('🎁', style: TextStyle(fontSize: 22)),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      g.name,
-                                      style: const TextStyle(fontSize: 10),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    Text(
-                                      '${g.price}·+${g.bondDelta}',
-                                      style: TextStyle(
-                                        fontSize: 9,
-                                        color: Colors.white.withValues(alpha: 0.55),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                        ],
                       ),
-                  ],
+                    ),
+                  ),
                 ),
               ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+            ),
+            if (_giftOpen)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _giftPicker(),
+              ),
+            _inputPill(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _inputPill() {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(30),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x66000000),
+            blurRadius: 18,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(30),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 26, sigmaY: 26),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: AppColors.glassSoft,
+              borderRadius: BorderRadius.circular(AppColors.radiusPill),
+              border: Border.all(
+                color: AppColors.strokeStrong,
+                width: 1.2,
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Material(
-                    color: Colors.white.withValues(alpha: 0.1),
-                    shape: const CircleBorder(),
-                    child: InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: widget.enabled ? widget.onPickImage : null,
-                      child: const SizedBox(
-                        width: 42,
-                        height: 42,
-                        child: Icon(Icons.image_outlined, size: 22),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Material(
-                    color: Colors.white.withValues(alpha: 0.1),
-                    shape: const CircleBorder(),
-                    child: InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: widget.enabled
-                          ? () async {
-                              final open = !_giftOpen;
-                              setState(() => _giftOpen = open);
-                              if (open) await _ensureGifts();
-                            }
-                          : null,
-                      child: const SizedBox(
-                        width: 42,
-                        height: 42,
-                        child: Icon(Icons.card_giftcard_rounded, size: 22),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
+                  _plusButton(),
                   Expanded(
                     child: TextField(
                       controller: widget.controller,
@@ -3707,58 +4045,410 @@ class _ComposerBarState extends State<_ComposerBar> {
                       minLines: 1,
                       maxLines: 4,
                       textInputAction: TextInputAction.send,
-                      onSubmitted: (_) {
-                        if (widget.enabled && !widget.sending) widget.onSubmit();
+                      onTap: () {
+                        if (_plusOpen) unawaited(_setPlusOpen(false));
                       },
+                      onSubmitted: (_) {
+                        if (widget.enabled && !widget.sending) {
+                          widget.onSubmit();
+                        }
+                      },
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        height: 1.35,
+                      ),
                       decoration: InputDecoration(
                         hintText: widget.hint,
-                        filled: true,
-                        fillColor: Colors.white.withValues(alpha: 0.1),
+                        hintStyle: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.62),
+                        ),
+                        filled: false,
+                        isDense: true,
                         contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
+                          horizontal: 6,
+                          vertical: 11,
                         ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Material(
-                    color: AppColors.primary,
-                    shape: const CircleBorder(),
-                    elevation: 0,
-                    shadowColor: AppColors.primary.withValues(alpha: 0.5),
-                    child: InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: (widget.enabled && !widget.sending)
-                          ? widget.onSubmit
-                          : null,
-                      child: SizedBox(
-                        width: 46,
-                        height: 46,
-                        child: Center(
-                          child: widget.sending
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : const Icon(
-                                  Icons.send_rounded,
-                                  color: Colors.white,
-                                  size: 20,
-                                ),
-                        ),
-                      ),
-                    ),
-                  ),
+                  _sendButton(),
                 ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _plusButton() {
+    return GestureDetector(
+      onTap: widget.enabled
+          ? () {
+              HapticFeedback.selectionClick();
+              unawaited(_setPlusOpen(!_plusOpen));
+            }
+          : null,
+      child: SizedBox(
+        width: 44,
+        height: 44,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _plusOpen
+                ? Colors.white.withValues(alpha: 0.32)
+                : Colors.transparent,
+          ),
+          child: RotationTransition(
+            turns: _plusTurn,
+            child: Icon(
+              _plusOpen ? Icons.close_rounded : Icons.add_rounded,
+              color: Colors.white.withValues(alpha: 0.92),
+              size: 26,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sendButton() {
+    return GestureDetector(
+      onTap: (widget.enabled && !widget.sending) ? widget.onSubmit : null,
+      child: SizedBox(
+        width: 40,
+        height: 40,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.white.withValues(alpha: widget.sending ? 0.16 : 0.34),
+          ),
+          child: Center(
+            child: widget.sending
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : Icon(
+                    Icons.arrow_upward_rounded,
+                    color: Colors.white.withValues(alpha: 0.95),
+                    size: 20,
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _giftPicker() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+        child: DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.glassSoft,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppColors.strokeStrong),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _stardust == null ? '星尘礼物' : '星尘礼物 · 余额 $_stardust',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.white.withValues(alpha: 0.65),
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => setState(() => _giftOpen = false),
+                  behavior: HitTestBehavior.opaque,
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(
+                      Icons.close_rounded,
+                      size: 18,
+                      color: Colors.white.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            if (_giftsLoading)
+              const Padding(
+                padding: EdgeInsets.all(12),
+                child: Center(
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              )
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final g in _gifts ?? const <GiftDto>[])
+                    InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: widget.enabled
+                          ? () async {
+                              if (_stardust != null &&
+                                  _stardust! < g.price) {
+                                final go = await showDialog<bool>(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    backgroundColor: AppColors.bgDarkElevated,
+                                    title: const Text('星尘不足'),
+                                    content: Text(
+                                      '「${g.name}」需要 ${g.price} 星尘，'
+                                      '当前余额 $_stardust。开通 VIP 可获赠星尘，去看看？',
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, false),
+                                        child: const Text('取消'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, true),
+                                        child: const Text('去开通 VIP'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (go == true && mounted) {
+                                  final s = AppStateScope.of(context);
+                                  final m = s.user?.membership ??
+                                      const Membership();
+                                  await Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => MembershipBenefitsPage(
+                                        membership: m,
+                                      ),
+                                    ),
+                                  );
+                                  if (!mounted) return;
+                                  try {
+                                    final s = AppStateScope.of(context);
+                                    final wallet = await s
+                                        .api()
+                                        .getWallet(userId: s.userId);
+                                    if (mounted) {
+                                      setState(
+                                        () => _stardust = wallet.stardust,
+                                      );
+                                    }
+                                  } catch (_) {/* ignore */}
+                                }
+                                return;
+                              }
+                              await widget.onGift?.call(g);
+                              if (mounted) setState(() => _giftOpen = false);
+                            }
+                          : null,
+                      child: Container(
+                        width: 72,
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: AppColors.accentPink.withValues(alpha: 0.35),
+                          ),
+                        ),
+                        child: Column(
+                          children: [
+                            if (g.thumbUrl.isNotEmpty)
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: AppNetworkImage(
+                                  url: widget.resolveAbsoluteUrl?.call(
+                                        g.thumbUrl,
+                                      ) ??
+                                      g.thumbUrl,
+                                  width: 40,
+                                  height: 40,
+                                  fit: BoxFit.contain,
+                                  placeholder: (_, __) => const SizedBox(
+                                    width: 40,
+                                    height: 40,
+                                    child: Center(
+                                      child: SizedBox(
+                                        width: 14,
+                                        height: 14,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  errorWidget: (_, __, ___) => const Text(
+                                    '🎁',
+                                    style: TextStyle(fontSize: 22),
+                                  ),
+                                ),
+                              )
+                            else
+                              const Text('🎁', style: TextStyle(fontSize: 22)),
+                            const SizedBox(height: 4),
+                            Text(
+                              g.name,
+                              style: const TextStyle(fontSize: 10),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            Text(
+                              '${g.price}·+${g.bondDelta}',
+                              style: TextStyle(
+                                fontSize: 9,
+                                color: Colors.white.withValues(alpha: 0.55),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+          ],
+        ),
+      ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ImmersiveBubble extends StatelessWidget {
+  const _ImmersiveBubble({
+    required this.text,
+    required this.isUser,
+    this.emoji = false,
+  });
+
+  final String text;
+  final bool isUser;
+  final bool emoji;
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.only(
+      topLeft: const Radius.circular(24),
+      topRight: const Radius.circular(24),
+      bottomLeft: Radius.circular(isUser ? 24 : 10),
+      bottomRight: Radius.circular(isUser ? 10 : 24),
+    );
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: radius,
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x4D000000),
+            blurRadius: 16,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: isUser ? AppColors.glassLight : AppColors.glassSmoke,
+              borderRadius: radius,
+              border: Border.all(
+                color: isUser ? AppColors.strokeStrong : AppColors.strokeSoft,
+              ),
+            ),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: emoji ? 14 : 16,
+                vertical: emoji ? 10 : 13,
+              ),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 280),
+                child: Text(
+                  text,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: emoji ? 40 : 15.5,
+                    height: emoji ? 1.1 : 1.45,
+                    fontWeight: FontWeight.w400,
+                    shadows: const [
+                      Shadow(blurRadius: 6, color: Color(0x66000000)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlusAction extends StatelessWidget {
+  const _PlusAction({
+    required this.icon,
+    required this.label,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: SizedBox(
+        width: 76,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 62,
+              height: 62,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withValues(alpha: 0.28),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.36),
+                  width: 1.2,
+                ),
+              ),
+              child: Icon(icon, color: Colors.white, size: 26),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.white.withValues(alpha: 0.82),
               ),
             ),
           ],
@@ -3766,4 +4456,20 @@ class _ComposerBarState extends State<_ComposerBar> {
       ),
     );
   }
+}
+
+class _ChatMsgExtra {
+  const _ChatMsgExtra({
+    this.isMemory = false,
+    this.isSceneImage = false,
+    this.sceneTitle = '',
+    this.summary = '',
+    this.imageUrl = '',
+  });
+
+  final bool isMemory;
+  final bool isSceneImage;
+  final String sceneTitle;
+  final String summary;
+  final String imageUrl;
 }

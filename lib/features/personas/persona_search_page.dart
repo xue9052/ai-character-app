@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../api/models.dart';
 import '../../services/app_state.dart';
 import '../../theme/app_theme.dart';
+import '../../theme/app_widgets.dart';
 import 'persona_cover.dart';
 import 'persona_detail_page.dart';
 import 'persona_presets.dart';
@@ -107,13 +108,18 @@ class _PersonaSearchPageState extends State<PersonaSearchPage> {
     return Theme(
       data: buildAppDarkTheme(),
       child: Scaffold(
-        backgroundColor: const Color(0xFF0E0E14),
+        backgroundColor: AppColors.bgDark,
         appBar: AppBar(
-          backgroundColor: const Color(0xFF0E0E14),
+          backgroundColor: Colors.transparent,
           elevation: 0,
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back_rounded),
-            onPressed: () => Navigator.of(context).pop(),
+          leadingWidth: 44,
+          leading: Center(
+            child: FrostIconButton(
+              icon: Icons.arrow_back_rounded,
+              size: 32,
+              iconSize: 18,
+              onTap: () => Navigator.of(context).pop(),
+            ),
           ),
           title: _buildSearchField(),
           titleSpacing: 0,
@@ -140,31 +146,24 @@ class _PersonaSearchPageState extends State<PersonaSearchPage> {
           _debounce?.cancel();
           _runSearch();
         },
-        style: const TextStyle(color: Colors.white, fontSize: 16),
-        decoration: InputDecoration(
+        style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
+        decoration: frostInputDecoration(
           hintText: '搜索角色名、简介或标签',
-          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.35)),
-          filled: true,
-          fillColor: const Color(0xFF1C1C28),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
-          ),
-          prefixIcon: Icon(
+          prefixIcon: const Icon(
             Icons.search_rounded,
-            color: Colors.white.withValues(alpha: 0.45),
+            color: AppColors.textMuted,
           ),
           suffixIcon: _queryCtrl.text.isNotEmpty
               ? IconButton(
                   tooltip: '清空',
-                  icon: Icon(
+                  icon: const Icon(
                     Icons.close_rounded,
-                    color: Colors.white.withValues(alpha: 0.45),
+                    color: AppColors.textMuted,
                   ),
                   onPressed: _clearQuery,
                 )
               : null,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         ),
       ),
     );
@@ -198,12 +197,10 @@ class _PersonaSearchPageState extends State<PersonaSearchPage> {
           color: active ? Colors.white : Colors.white.withValues(alpha: 0.65),
           fontWeight: active ? FontWeight.w600 : FontWeight.w500,
         ),
-        backgroundColor: const Color(0xFF1C1C28),
-        selectedColor: AppColors.primary.withValues(alpha: 0.35),
+        backgroundColor: AppColors.glassSmoke,
+        selectedColor: AppColors.glassLight,
         side: BorderSide(
-          color: active
-              ? AppColors.primaryLight.withValues(alpha: 0.6)
-              : Colors.white.withValues(alpha: 0.08),
+          color: active ? AppColors.strokeStrong : AppColors.strokeSoft,
         ),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -297,8 +294,8 @@ class _SearchResultTile extends StatelessWidget {
     final tags = p.tags.take(3).toList(growable: false);
 
     return Material(
-      color: const Color(0xFF1C1C28),
-      borderRadius: BorderRadius.circular(14),
+      color: AppColors.glassSmoke,
+      borderRadius: BorderRadius.circular(AppColors.radiusCard),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,

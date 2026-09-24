@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
 /// 本地聊天缓存：每角色最近 30 条 + 会话摘要（聊天页 / 聊天列表秒开）
@@ -10,7 +11,7 @@ class ChatLocalStore {
   static final ChatLocalStore instance = ChatLocalStore._();
 
   static const _dbName = 'chat_cache.db';
-  static const _schemaVersion = 1;
+  static const _schemaVersion = 2;
   static const localMessageLimit = 30;
 
   Database? _db;
@@ -64,6 +65,10 @@ class ChatLocalStore {
         await db.execute(
           'CREATE INDEX idx_chat_sessions_ts ON chat_sessions(user_id, last_ts DESC)',
         );
+        await _createInboxTable(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) await _createInboxTable(db);
       },
     );
     return _db!;
@@ -112,6 +117,115 @@ class ChatLocalStore {
       'persona': _decodeJson(s['persona_json'] as String?),
       'emotion': _decodeJson(s['emotion_json'] as String?),
       '_local': true,
+    };
+  }
+
+  static Future<void> _createInboxTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS chat_inbox (
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        peer_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        preview TEXT NOT NULL DEFAULT '',
+        last_ts INTEGER NOT NULL DEFAULT 0,
+        last_seq INTEGER NOT NULL DEFAULT 0,
+        read_seq INTEGER NOT NULL DEFAULT 0,
+        stage_label TEXT NOT NULL DEFAULT '',
+        bond_score INTEGER,
+        cover_url TEXT,
+        cover_emoji TEXT,
+        cover_color TEXT,
+        one_liner TEXT NOT NULL DEFAULT '',
+        can_send INTEGER NOT NULL DEFAULT 1,
+        member_covers_json TEXT NOT NULL DEFAULT '[]',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (user_id, kind, peer_id)
+      )
+    ''');
+  }
+
+  /// 最近聊天本地镜像，形状对齐 /chat/sessions。
+  Future<List<Map<String, dynamic>>> listInbox(String userId) async {
+    final uid = userId.trim();
+    if (uid.isEmpty) return [];
+    final db = await _open();
+    final rows = await db.query(
+      'chat_inbox',
+      where: 'user_id = ?',
+      whereArgs: [uid],
+      orderBy: 'last_ts DESC',
+      limit: 50,
+    );
+    return rows.map(_inboxRowToMap).toList();
+  }
+
+  Future<void> saveInbox(String userId, List<Map<String, dynamic>> sessions) async {
+    final uid = userId.trim();
+    if (uid.isEmpty) return;
+    final db = await _open();
+    final batch = db.batch();
+    batch.delete('chat_inbox', where: 'user_id = ?', whereArgs: [uid]);
+    for (final item in sessions) {
+      final kind = '${item['kind'] ?? 'direct'}';
+      final peer = '${item['peer_id'] ?? item['persona_id'] ?? ''}'.trim();
+      if (peer.isEmpty) continue;
+      final covers = item['member_covers'];
+      batch.insert('chat_inbox', {
+        'user_id': uid,
+        'kind': kind,
+        'peer_id': peer,
+        'title': '${item['title'] ?? item['persona_name'] ?? ''}',
+        'preview': '${item['preview'] ?? item['last_preview'] ?? ''}',
+        'last_ts': (item['last_ts'] as num?)?.toInt() ??
+            (item['last_message_at'] as num?)?.toInt() ??
+            0,
+        'last_seq': (item['last_seq'] as num?)?.toInt() ??
+            (item['total_messages'] as num?)?.toInt() ??
+            0,
+        'read_seq': (item['read_seq'] as num?)?.toInt() ?? 0,
+        'stage_label': '${item['stage_label'] ?? ''}',
+        'bond_score': (item['bond_score'] as num?)?.toInt(),
+        'cover_url': item['cover_url'],
+        'cover_emoji': item['cover_emoji'],
+        'cover_color': item['cover_color'],
+        'one_liner': '${item['one_liner'] ?? ''}',
+        'can_send': item['can_send'] == false ? 0 : 1,
+        'member_covers_json': jsonEncode(covers is List ? covers : const []),
+        'payload_json': jsonEncode(item),
+      });
+    }
+    await batch.commit(noResult: true);
+  }
+
+  Map<String, dynamic> _inboxRowToMap(Map<String, Object?> row) {
+    final payload = _decodeJson(row['payload_json'] as String?);
+    if (payload is Map) {
+      return Map<String, dynamic>.from(payload);
+    }
+    final kind = '${row['kind'] ?? 'direct'}';
+    final peer = '${row['peer_id'] ?? ''}';
+    return {
+      'kind': kind,
+      'peer_id': peer,
+      'persona_id': kind == 'direct' ? peer : '',
+      'persona_name': row['title'] ?? '',
+      'title': row['title'] ?? '',
+      'preview': row['preview'] ?? '',
+      'last_preview': row['preview'] ?? '',
+      'last_ts': row['last_ts'] ?? 0,
+      'last_message_at': row['last_ts'] ?? 0,
+      'last_seq': row['last_seq'] ?? 0,
+      'total_messages': row['last_seq'] ?? 0,
+      'read_seq': row['read_seq'] ?? 0,
+      'stage_label': row['stage_label'] ?? '',
+      'bond_score': row['bond_score'],
+      'cover_url': row['cover_url'],
+      'cover_emoji': row['cover_emoji'],
+      'cover_color': row['cover_color'],
+      'one_liner': row['one_liner'] ?? '',
+      'can_send': (row['can_send'] as int? ?? 1) == 1,
+      'member_covers': _decodeJson(row['member_covers_json'] as String?) ?? const [],
     };
   }
 
@@ -385,5 +499,43 @@ class ChatLocalStore {
     } catch (_) {
       return null;
     }
+  }
+
+  Future<int> getLastReadTotal(String userId, String personaId) async {
+    final sp = await SharedPreferences.getInstance();
+    return sp.getInt('chat_read_${userId.trim()}_${personaId.trim()}') ?? 0;
+  }
+
+  /// 首次见到这个会话时，把当前条数记为已读起点并返回。
+  ///
+  /// 本地没有已读记录时退成 0，会把整段历史都算成未读（换设备、清数据都会踩到），
+  /// 所以只有基线之后新增的消息才算未读。
+  Future<int> ensureReadBaseline(
+    String userId,
+    String personaId,
+    int total,
+  ) async {
+    final uid = userId.trim();
+    final pid = personaId.trim();
+    if (uid.isEmpty || pid.isEmpty) return 0;
+    final sp = await SharedPreferences.getInstance();
+    final key = 'chat_read_${uid}_$pid';
+    final existing = sp.getInt(key);
+    if (existing != null) return existing;
+    final baseline = total > 0 ? total : 0;
+    await sp.setInt(key, baseline);
+    return baseline;
+  }
+
+  Future<void> setLastReadTotal(
+    String userId,
+    String personaId,
+    int total,
+  ) async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setInt(
+      'chat_read_${userId.trim()}_${personaId.trim()}',
+      total < 0 ? 0 : total,
+    );
   }
 }

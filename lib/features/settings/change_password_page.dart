@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_exception.dart';
 import '../../services/app_state.dart';
+import '../../theme/app_widgets.dart';
 
 class ChangePasswordPage extends StatefulWidget {
   const ChangePasswordPage({super.key});
@@ -97,7 +98,7 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
             ),
           ),
           const SizedBox(height: 20),
-          FilledButton(
+          FrostButton(
             onPressed: _busy ? null : _submit,
             child: Text(_busy ? '提交中…' : '保存'),
           ),

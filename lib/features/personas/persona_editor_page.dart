@@ -15,6 +15,7 @@ import 'persona_cover.dart';
 import 'persona_look_gen_page.dart';
 import 'persona_presets.dart';
 import 'persona_template_more_page.dart';
+import 'persona_voice_section.dart';
 import 'persona_templates.dart';
 
 /// 猫箱式「创建/编辑角色」：形象占位 + 简介 + 设定 + 开场白
@@ -56,6 +57,8 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
   String _gender = ''; // female | male | other | ''
   String? _voiceProfileId;
   List<VoiceProfileDto> _voiceProfiles = const [];
+  PersonaVoiceSelection _voiceSelection = const PersonaVoiceSelection(mode: 'preset');
+  String? _initialCosyvoiceVoice;
   bool _partitionedMode = true;
   final List<TextEditingController> _altGreetingCtrls = [];
   Uint8List? _lookBytes; // 完整长方形形象图（聊天背景）
@@ -321,6 +324,7 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
         }
         _gender = p.gender ?? '';
         _voiceProfileId = p.voiceProfileId;
+        _initialCosyvoiceVoice = p.cosyvoiceVoice;
         _syncVoiceWithGender(preferKeep: true);
       });
     } catch (e) {
@@ -430,7 +434,12 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
         coverColor: _coverColor,
         backgroundKey: _lookBytes != null ? 'upload' : _backgroundKey,
         alternateGreetings: alternateGreetings,
-        voiceProfileId: _voiceProfileId ?? '',
+        voiceProfileId: _voiceSelection.mode == 'preset'
+            ? (_voiceSelection.voiceProfileId ?? '')
+            : null,
+        voiceCloneJobId: _voiceSelection.mode == 'custom'
+            ? _voiceSelection.voiceCloneJobId
+            : null,
         gender: _gender,
         scenario: _scenarioCtrl.text.trim(),
         appearance: _appearanceCtrl.text.trim(),
@@ -1004,48 +1013,17 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      Text('音色', style: theme.textTheme.titleMedium),
-                      const SizedBox(height: 4),
-                      Text(
-                        _gender == 'female' || _gender == 'male'
-                            ? '已按性别筛选音色库，点选即绑定'
-                            : '请先选性别以便筛选；也可先浏览全部音色',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
+                      PersonaVoiceSection(
+                        key: ValueKey('voice-${_appliedTemplateId ?? ''}-$_gender-${_voiceProfileId ?? ''}'),
+                        api: AppStateScope.of(context).api(),
+                        baseUrl: AppStateScope.of(context).baseUrl,
+                        userId: AppStateScope.of(context).userId,
+                        profiles: _voiceProfiles,
+                        gender: _gender,
+                        initialVoiceProfileId: _voiceProfileId,
+                        initialCosyvoiceVoice: _initialCosyvoiceVoice,
+                        onChanged: (sel) => _voiceSelection = sel,
                       ),
-                      const SizedBox(height: 8),
-                      if (_voicesForGender.isEmpty)
-                        Text(
-                          '暂无可用音色',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        )
-                      else
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            ChoiceChip(
-                              label: const Text('不绑定'),
-                              selected: _voiceProfileId == null,
-                              onSelected: (_) =>
-                                  setState(() => _voiceProfileId = null),
-                            ),
-                            for (final v in _voicesForGender)
-                              ChoiceChip(
-                                label: Text(
-                                  v.category == null || v.category!.isEmpty
-                                      ? v.label
-                                      : '${v.label}·${v.category}',
-                                ),
-                                selected: _voiceProfileId == v.id,
-                                onSelected: (_) =>
-                                    setState(() => _voiceProfileId = v.id),
-                              ),
-                          ],
-                        ),
                       const SizedBox(height: 12),
                       Row(
                         children: [
@@ -1163,7 +1141,7 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.primary, width: 1.2),
+        borderSide: const BorderSide(color: AppColors.strokeStrong, width: 1.2),
       ),
     );
   }
@@ -1278,21 +1256,14 @@ class _CreateGradientButton extends StatelessWidget {
       opacity: onPressed == null ? 0.5 : 1,
       child: Material(
         color: Colors.transparent,
+        borderRadius: BorderRadius.circular(28),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onPressed,
-          borderRadius: BorderRadius.circular(28),
           child: Ink(
             height: 52,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(28),
               gradient: AppColors.primaryGradient,
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.primary.withValues(alpha: 0.4),
-                  blurRadius: 18,
-                  offset: const Offset(0, 8),
-                ),
-              ],
             ),
             child: Center(
               child: DefaultTextStyle(
@@ -1537,29 +1508,22 @@ class _AppearanceBlock extends StatelessWidget {
   }
 
   Widget _templateAvatarLook(String coverUrl, String label) {
-    Map<String, String>? preset;
-    for (final p in kBackgroundPresets) {
-      if (p['key'] == backgroundKey) {
-        preset = p;
-        break;
-      }
-    }
-    preset ??= kBackgroundPresets.first;
+    final url = resolvePersonaCoverUrl(baseUrl, coverUrl);
     return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            parseHexColor(preset['color_from']!),
-            parseHexColor(colorHex),
-            parseHexColor(preset['color_to']!),
-          ],
-        ),
-      ),
+      decoration: BoxDecoration(color: parseHexColor(colorHex)),
       child: Stack(
         fit: StackFit.expand,
         children: [
+          if (url != null && url.isNotEmpty)
+            AppNetworkImage(
+              url: url,
+              fit: BoxFit.cover,
+              alignment: const Alignment(0, -0.15),
+              errorWidget: (_, __, ___) => const SizedBox.expand(),
+            ),
+          const DecoratedBox(
+            decoration: BoxDecoration(color: Color(0x66000000)),
+          ),
           Center(
             child: PersonaCoverAvatar(
               baseUrl: baseUrl,

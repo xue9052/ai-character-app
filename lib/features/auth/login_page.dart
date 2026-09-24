@@ -6,6 +6,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../services/app_state.dart';
 import '../../services/dev_flags.dart';
 import '../../theme/app_theme.dart';
+import '../../theme/app_widgets.dart';
 import 'register_page.dart';
 import 'reset_password_page.dart';
 
@@ -18,11 +19,10 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
-  static const _titleColor = Color(0xFF4A3E75);
-  static const _labelColor = Color(0xFF5A4F82);
-  static const _hintColor = Color(0xFFA89FBC);
-  static const _fieldBorder = Color(0xFFD8D0EA);
-  static const _linkColor = Color(0xFF6B5F96);
+  static const _titleColor = AppColors.textPrimary;
+  static const _labelColor = AppColors.textSecondary;
+  static const _hintColor = AppColors.textMuted;
+  static const _linkColor = AppColors.textSecondary;
 
   final _email = TextEditingController();
   final _password = TextEditingController();
@@ -98,33 +98,7 @@ class _LoginPageState extends State<LoginPage> {
     required String hint,
     Widget? suffixIcon,
   }) {
-    return InputDecoration(
-      hintText: hint,
-      hintStyle: const TextStyle(
-        color: _hintColor,
-        fontSize: 14,
-        fontWeight: FontWeight.w400,
-      ),
-      filled: true,
-      fillColor: Colors.white.withValues(alpha: 0.55),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      suffixIcon: suffixIcon,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: _fieldBorder, width: 1),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(
-          color: _fieldBorder.withValues(alpha: 0.85),
-          width: 1,
-        ),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.primary, width: 1.4),
-      ),
-    );
+    return frostInputDecoration(hintText: hint, suffixIcon: suffixIcon);
   }
 
   @override
@@ -164,7 +138,7 @@ class _LoginPageState extends State<LoginPage> {
                 colors: [
                   Colors.white.withValues(alpha: 0.08),
                   Colors.transparent,
-                  const Color(0xFF7B6CF6).withValues(alpha: 0.08),
+                  Colors.black.withValues(alpha: 0.28),
                 ],
               ),
             ),
@@ -189,6 +163,10 @@ class _LoginPageState extends State<LoginPage> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         const SizedBox(height: 6),
+                        const Center(
+                          child: SouloraMark(size: 64),
+                        ),
+                        const SizedBox(height: 12),
                         // 品牌：衬线 + 上方小光弧
                         SizedBox(
                           height: 56,
@@ -230,7 +208,7 @@ class _LoginPageState extends State<LoginPage> {
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 10),
                               child: Text(
-                                '你的专属 AI 陪伴',
+                                AppBrand.tagline,
                                 style: TextStyle(
                                   color: _labelColor.withValues(alpha: 0.85),
                                   fontSize: 13,
@@ -345,7 +323,7 @@ class _LoginPageState extends State<LoginPage> {
                           ),
                         ),
                         const SizedBox(height: 28),
-                        _LoginGradientButton(
+                        FrostButton(
                           onPressed: _busy ? null : _login,
                           child: _busy
                               ? const SizedBox(
@@ -353,7 +331,7 @@ class _LoginPageState extends State<LoginPage> {
                                   height: 22,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2.4,
-                                    color: Colors.white,
+                                    color: AppColors.textPrimary,
                                   ),
                                 )
                               : const Text('登录'),
@@ -468,91 +446,20 @@ class _FrostedLoginCard extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(24, 28, 24, 18),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(30),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Colors.white.withValues(alpha: 0.58),
-                Colors.white.withValues(alpha: 0.38),
-                Colors.white.withValues(alpha: 0.48),
-              ],
-            ),
+            color: AppColors.glassSoft,
             border: Border.all(
-              color: Colors.white.withValues(alpha: 0.72),
+              color: AppColors.strokeStrong,
               width: 1.2,
             ),
-            boxShadow: [
+            boxShadow: const [
               BoxShadow(
-                color: const Color(0xFF7B6CF6).withValues(alpha: 0.18),
+                color: Color(0x66000000),
                 blurRadius: 36,
-                offset: const Offset(0, 16),
-              ),
-              BoxShadow(
-                color: Colors.white.withValues(alpha: 0.35),
-                blurRadius: 12,
-                spreadRadius: -2,
+                offset: Offset(0, 16),
               ),
             ],
           ),
           child: child,
-        ),
-      ),
-    );
-  }
-}
-
-class _LoginGradientButton extends StatelessWidget {
-  const _LoginGradientButton({
-    required this.onPressed,
-    required this.child,
-  });
-
-  final VoidCallback? onPressed;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onPressed != null;
-    return Opacity(
-      opacity: enabled ? 1 : 0.55,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onPressed,
-          borderRadius: BorderRadius.circular(14),
-          child: Ink(
-            height: 50,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                begin: Alignment.centerLeft,
-                end: Alignment.centerRight,
-                colors: [
-                  Color(0xFF7E72F2),
-                  Color(0xFF9B84F8),
-                  Color(0xFFA98BFF),
-                ],
-              ),
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF7B6CF6).withValues(alpha: 0.42),
-                  blurRadius: 18,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Center(
-              child: DefaultTextStyle(
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 16,
-                  letterSpacing: 1.2,
-                ),
-                child: child,
-              ),
-            ),
-          ),
         ),
       ),
     );

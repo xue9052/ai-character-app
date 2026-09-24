@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 
 import '../../api/api_exception.dart';
 import '../../api/api_client.dart';
 import '../../api/models.dart';
 import '../../services/app_state.dart';
+import '../../theme/app_theme.dart';
+import '../../theme/app_widgets.dart';
 import '../chat/chat_page.dart';
 import '../chat/chat_quick_replies.dart';
 import 'persona_cover.dart';
@@ -21,6 +26,14 @@ class PersonaDetailPage extends StatefulWidget {
 
 class _PersonaDetailPageState extends State<PersonaDetailPage> {
   Future<PersonaDetail>? _future;
+  final _previewPlayer = AudioPlayer();
+  bool _previewLoading = false;
+
+  @override
+  void dispose() {
+    _previewPlayer.dispose();
+    super.dispose();
+  }
 
   @override
   void didChangeDependencies() {
@@ -34,6 +47,48 @@ class _PersonaDetailPageState extends State<PersonaDetailPage> {
   }
 
   void _reload() => setState(() => _future = _load());
+
+  String _previewText(PersonaDetail p) {
+    for (final raw in [p.greeting, p.oneLiner]) {
+      final t = (raw ?? '').trim();
+      if (t.isNotEmpty) return t.length > 80 ? t.substring(0, 80) : t;
+    }
+    return '你好，我在呢。';
+  }
+
+  Future<void> _previewVoice(PersonaDetail p) async {
+    if (_previewLoading) return;
+    setState(() => _previewLoading = true);
+    final s = AppStateScope.of(context);
+    final text = _previewText(p);
+    try {
+      final data = await s.api().chatTts(
+            userId: s.userId,
+            personaId: p.id,
+            messageId: 'preview_${p.id}',
+            text: text,
+            clip: true,
+          );
+      final rel = '${data['audio_url'] ?? ''}'.trim();
+      if (rel.isEmpty) {
+        throw ApiException('未返回音频');
+      }
+      final abs = resolvePersonaCoverUrl(s.baseUrl, rel) ?? rel;
+      await _previewPlayer.stop();
+      await _previewPlayer.play(UrlSource(abs));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('试听：$text')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('试听失败：${apiErrorMessage(e)}')),
+      );
+    } finally {
+      if (mounted) setState(() => _previewLoading = false);
+    }
+  }
 
   bool _owned(PersonaDetail p) {
     final uid = AppStateScope.of(context).userId;
@@ -287,6 +342,19 @@ class _PersonaDetailPageState extends State<PersonaDetailPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
+                if (p.hasTtsVoice)
+                  OutlinedButton.icon(
+                    onPressed: _previewLoading ? null : () => unawaited(_previewVoice(p)),
+                    icon: _previewLoading
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.volume_up_outlined),
+                    label: Text(_previewLoading ? '生成中…' : '听她说一句'),
+                  ),
+                if (p.hasTtsVoice) const SizedBox(height: 12),
                 Text(
                   '试聊一句',
                   style: Theme.of(context).textTheme.titleSmall,
@@ -296,7 +364,7 @@ class _PersonaDetailPageState extends State<PersonaDetailPage> {
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    for (final tip in ChatQuickReplies.openers(
+                    for (final tip in ChatQuickReplies.companionOpeners(
                       personaName: p.name,
                     ).take(4))
                       ActionChip(
@@ -326,7 +394,7 @@ class _PersonaDetailPageState extends State<PersonaDetailPage> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                FilledButton(
+                FrostButton(
                   onPressed: () async {
                     final s = AppStateScope.of(context);
                     await s.setLastPersona(p.id);
@@ -378,7 +446,7 @@ class _PersonaDetailPageState extends State<PersonaDetailPage> {
     try {
       return Color(int.parse(hex, radix: 16) + 0xFF000000);
     } catch (_) {
-      return const Color(0xFF7B6CF6);
+      return AppColors.bgDarkElevated;
     }
   }
 }

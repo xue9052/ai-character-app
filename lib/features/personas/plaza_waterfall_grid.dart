@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 
 import '../../api/models.dart';
+import '../../theme/app_theme.dart';
 import 'persona_cover.dart';
 
 /// 卡片底色 + 文字区蒙层色（固定，不再从图片取色）
-const kPlazaCardBase = Color(0xFF1C1C28);
+const kPlazaCardBase = AppColors.bgDarkElevated;
 
 /// 瀑布流列宽（双列 + 边距 + 间距）
 double plazaWaterfallColumnWidth(BuildContext context, {double gap = 10}) {
@@ -72,7 +73,7 @@ class PlazaWaterfallCard extends StatelessWidget {
 
     return Material(
       color: kPlazaCardBase,
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(AppColors.radiusCard),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,

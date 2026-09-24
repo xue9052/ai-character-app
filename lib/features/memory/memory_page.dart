@@ -22,6 +22,7 @@ class _MemoryPageState extends State<MemoryPage> {
 
   static const _categories = <(String, String)>[
     ('all', '全部'),
+    ('scene', '场景'),
     ('biographical', '生平'),
     ('preference', '偏好'),
     ('relation', '关系'),
@@ -49,12 +50,18 @@ class _MemoryPageState extends State<MemoryPage> {
       _error = null;
     });
     try {
-      final list = await s.api().listMemories(
+      final apiCategory = _category == 'scene' ? 'event' : _category;
+      var list = await s.api().listMemories(
         userId: s.userId,
         personaId: widget.personaId,
-        category: _category,
+        category: apiCategory,
         q: _searchCtrl.text.trim(),
       );
+      if (_category == 'scene') {
+        list = list
+            .where((m) => m.text.trim().startsWith('【'))
+            .toList(growable: false);
+      }
       if (!mounted) return;
       setState(() {
         _items = list;

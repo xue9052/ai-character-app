@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_exception.dart';
 import '../../services/app_state.dart';
+import '../../theme/app_widgets.dart';
+import 'email_code_cooldown.dart';
 
 class ResetPasswordPage extends StatefulWidget {
   const ResetPasswordPage({super.key});
@@ -10,30 +12,22 @@ class ResetPasswordPage extends StatefulWidget {
   State<ResetPasswordPage> createState() => _ResetPasswordPageState();
 }
 
-class _ResetPasswordPageState extends State<ResetPasswordPage> {
+class _ResetPasswordPageState extends State<ResetPasswordPage>
+    with EmailCodeCooldown {
   final _email = TextEditingController();
   final _code = TextEditingController();
   final _password = TextEditingController();
   bool _busy = false;
   bool _sending = false;
-  int _cooldown = 0;
   String? _devHint;
 
   @override
   void dispose() {
+    disposeEmailCodeCooldown();
     _email.dispose();
     _code.dispose();
     _password.dispose();
     super.dispose();
-  }
-
-  void _tickCooldown() {
-    Future.doWhile(() async {
-      await Future<void>.delayed(const Duration(seconds: 1));
-      if (!mounted || _cooldown <= 0) return false;
-      setState(() => _cooldown -= 1);
-      return _cooldown > 0;
-    });
   }
 
   Future<void> _sendCode() async {
@@ -52,13 +46,13 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
         purpose: 'reset_password',
       );
       final dev = data['dev_code']?.toString();
+      final wait = (data['retry_after'] as num?)?.toInt() ??
+          (data['cooldown'] as num?)?.toInt() ??
+          60;
       setState(() {
-        _cooldown = (data['retry_after'] as num?)?.toInt() ??
-            (data['cooldown'] as num?)?.toInt() ??
-            60;
         _devHint = (dev != null && dev.isNotEmpty) ? '开发模式验证码：$dev' : null;
       });
-      _tickCooldown();
+      startEmailCodeCooldown(wait);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -72,8 +66,7 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
     } catch (e) {
       if (!mounted) return;
       if (e is ApiException && e.retryAfter != null && e.retryAfter! > 0) {
-        setState(() => _cooldown = e.retryAfter!);
-        _tickCooldown();
+        startEmailCodeCooldown(e.retryAfter!);
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(apiErrorMessage(e))),
@@ -136,9 +129,10 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
                 ),
               ),
               const SizedBox(width: 8),
-              FilledButton.tonal(
-                onPressed: (_sending || _cooldown > 0) ? null : _sendCode,
-                child: Text(_cooldown > 0 ? '${_cooldown}s' : '获取验证码'),
+              FrostButton(
+                expanded: false,
+                onPressed: (_sending || cooldown > 0) ? null : _sendCode,
+                child: Text(cooldown > 0 ? '${cooldown}s' : '获取验证码'),
               ),
             ],
           ),
@@ -156,7 +150,7 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
             ),
           ),
           const SizedBox(height: 20),
-          FilledButton(
+          FrostButton(
             onPressed: _busy ? null : _submit,
             child: Text(_busy ? '提交中…' : '重置并登录'),
           ),

@@ -1,10 +1,16 @@
+import 'dart:async' show TimeoutException, unawaited;
+import 'dart:convert' show jsonDecode, jsonEncode;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'chat_local_store.dart';
+import 'group_ws_manager.dart';
+import 'keep_alive_service.dart';
 import 'push_service.dart';
 import '../api/api_client.dart';
+import '../api/api_exception.dart';
 import '../api/models.dart';
 
 export '../api/api_exception.dart' show ApiException, apiErrorMessage;
@@ -16,6 +22,7 @@ class AppState extends ChangeNotifier {
     required this.useStream,
     required this.autoTts,
     required this.pushReminders,
+    required this.keepAliveBackground,
     this.lastPersonaId,
     String? accessToken,
     AuthUser? user,
@@ -32,11 +39,18 @@ class AppState extends ChangeNotifier {
   bool autoTts;
   /// 主动关怀推送提醒（极光 JPush；默认关）
   bool pushReminders;
+  /// 后台保持在线（Android 常驻前台服务，维持群聊长连接）
+  bool keepAliveBackground;
   String? lastPersonaId;
   /// 私聊有更新时递增，聊天列表监听后刷新预览
   int chatListVersion = 0;
   /// personaId → 最新预览（乐观更新，避免 Web/缓存导致返回列表仍是旧句）
   final Map<String, ChatSessionPreview> sessionPreviews = {};
+  /// 群聊灰度配置（启动后拉一次）
+  GroupChatConfig? groupChatConfig;
+  int groupListVersion = 0;
+  /// 群列表缓存（IM 长连接实时更新预览/未读）
+  final Map<String, GroupSummaryDto> groupCache = {};
 
   String get userId => _user?.id ?? _userId;
   String get baseUrl => _baseUrl;
@@ -66,6 +80,144 @@ class AppState extends ChangeNotifier {
   void notifyChatUpdated() {
     chatListVersion++;
     notifyListeners();
+  }
+
+  void notifyGroupListUpdated() {
+    groupListVersion++;
+    chatListVersion++;
+    notifyListeners();
+  }
+
+  Future<void> refreshGroupChatConfig() async {
+    if (!isLoggedIn) return;
+    try {
+      groupChatConfig = await api().getGroupChatConfig();
+      notifyListeners();
+      if (groupChatConfig?.enabled == true) {
+        await _startGroupIm();
+      } else {
+        await GroupWsManager.instance.stop();
+        groupCache.clear();
+        await syncKeepAlive();
+      }
+    } catch (_) {
+      groupChatConfig = GroupChatConfig(enabled: false);
+      notifyListeners();
+      await GroupWsManager.instance.stop();
+      await syncKeepAlive();
+    }
+  }
+
+  Future<void> _startGroupIm() async {
+    PushService.instance.onGroupPush = _onGroupPush;
+    await GroupWsManager.instance.start(this);
+    await syncKeepAlive();
+  }
+
+  /// 长连接可用且用户没关开关时，才拉起常驻前台服务。
+  bool get keepAliveWanted =>
+      keepAliveBackground &&
+      isLoggedIn &&
+      groupChatConfig?.enabled == true &&
+      KeepAliveService.supported;
+
+  Future<void> syncKeepAlive() async {
+    if (!KeepAliveService.supported) return;
+    if (keepAliveWanted) {
+      await KeepAliveService.instance.start();
+    } else {
+      await KeepAliveService.instance.stop();
+    }
+  }
+
+  void _onGroupPush(String groupId) {
+    unawaited(GroupWsManager.instance.syncGroups());
+    notifyGroupListUpdated();
+  }
+
+  void cacheGroups(List<GroupSummaryDto> groups) {
+    final incoming = <String>{};
+    for (final g in groups) {
+      incoming.add(g.id);
+      final prev = groupCache[g.id];
+      if (prev == null) {
+        groupCache[g.id] = g;
+        continue;
+      }
+      final apiNewer = g.lastSeq >= prev.lastSeq;
+      groupCache[g.id] = GroupSummaryDto(
+        id: g.id,
+        title: g.title.isNotEmpty ? g.title : prev.title,
+        coverUrl: g.coverUrl.isNotEmpty ? g.coverUrl : prev.coverUrl,
+        lastPreview: apiNewer && g.lastPreview.isNotEmpty
+            ? g.lastPreview
+            : prev.lastPreview,
+        lastSeq: apiNewer ? g.lastSeq : prev.lastSeq,
+        lastMessageAt: g.lastMessageAt >= prev.lastMessageAt
+            ? g.lastMessageAt
+            : prev.lastMessageAt,
+        canSend: g.canSend,
+        members: g.members.isNotEmpty ? g.members : prev.members,
+        memberCovers:
+            g.memberCovers.isNotEmpty ? g.memberCovers : prev.memberCovers,
+      );
+    }
+    groupCache.removeWhere((id, _) => !incoming.contains(id));
+    notifyGroupListUpdated();
+  }
+
+  void applyGroupMessage(String groupId, GroupMessageDto msg) {
+    final g = groupCache[groupId];
+    final base = g ??
+        GroupSummaryDto(
+          id: groupId,
+          title: '',
+          coverUrl: '',
+          lastPreview: '',
+          lastSeq: 0,
+          lastMessageAt: 0,
+          canSend: true,
+        );
+    final prefix = msg.isUser
+        ? '我：'
+        : (msg.senderName.isNotEmpty ? '${msg.senderName}：' : '');
+    final preview = '$prefix${msg.content}'.trim();
+    groupCache[groupId] = GroupSummaryDto(
+      id: base.id,
+      title: base.title,
+      coverUrl: base.coverUrl,
+      lastPreview: preview.isNotEmpty ? preview : base.lastPreview,
+      lastSeq: msg.seq > base.lastSeq ? msg.seq : base.lastSeq,
+      lastMessageAt: msg.createdAt > 0 ? msg.createdAt : base.lastMessageAt,
+      canSend: base.canSend,
+      members: base.members,
+      memberCovers: base.memberCovers,
+    );
+    groupListVersion++;
+    notifyListeners();
+  }
+
+  void patchGroupLastSeq(String groupId, int lastSeq) {
+    final g = groupCache[groupId];
+    if (g == null || lastSeq <= g.lastSeq) return;
+    groupCache[groupId] = GroupSummaryDto(
+      id: g.id,
+      title: g.title,
+      coverUrl: g.coverUrl,
+      lastPreview: g.lastPreview,
+      lastSeq: lastSeq,
+      lastMessageAt: g.lastMessageAt,
+      canSend: g.canSend,
+      members: g.members,
+      memberCovers: g.memberCovers,
+    );
+    groupListVersion++;
+    notifyListeners();
+  }
+
+  void removeGroupFromCache(String groupId) {
+    groupCache.remove(groupId);
+    notifyGroupListUpdated();
   }
 
   void updateSessionPreview({
@@ -106,6 +258,7 @@ class AppState extends ChangeNotifier {
   static const _kStream = 'use_stream';
   static const _kAutoTts = 'auto_tts';
   static const _kPushReminders = 'push_reminders';
+  static const _kKeepAlive = 'keep_alive_background';
   static const _kPersona = 'last_persona_id';
   static const _kToken = 'access_token';
   static const _kNickname = 'nickname';
@@ -116,6 +269,20 @@ class AppState extends ChangeNotifier {
   static const _kAvatarColor = 'avatar_color';
   static const _kAvatarUrl = 'avatar_url';
   static const _kProfileCompleted = 'profile_completed';
+  static const _kOnboardingCompleted = 'onboarding_completed';
+  static const _kMembership = 'membership';
+
+  /// 冷启动先用缓存的会员身份渲染，随后 profile 刷新会覆盖成服务端口径
+  static Membership _decodeMembership(String? raw) {
+    if (raw == null || raw.isEmpty) return const Membership();
+    try {
+      final j = jsonDecode(raw);
+      if (j is Map) return Membership.fromJson(Map<String, dynamic>.from(j));
+    } catch (_) {
+      // 缓存坏了就按免费档，等下次刷新
+    }
+    return const Membership();
+  }
 
   static Future<AppState> load() async {
     final sp = await SharedPreferences.getInstance();
@@ -143,6 +310,8 @@ class AppState extends ChangeNotifier {
         avatarUrl: sp.getString(_kAvatarUrl) ?? '',
         bio: sp.getString(_kBio) ?? '',
         profileCompleted: sp.getBool(_kProfileCompleted) ?? false,
+        onboardingCompleted: sp.getBool(_kOnboardingCompleted) ?? false,
+        membership: _decodeMembership(sp.getString(_kMembership)),
       );
     }
 
@@ -151,23 +320,36 @@ class AppState extends ChangeNotifier {
       baseUrl: base,
       useStream: sp.getBool(_kStream) ?? !kIsWeb,
       autoTts: sp.getBool(_kAutoTts) ?? true,
-      pushReminders: sp.getBool(_kPushReminders) ?? false,
+      pushReminders: sp.getBool(_kPushReminders) ?? true,
+      keepAliveBackground: sp.getBool(_kKeepAlive) ?? true,
       lastPersonaId: sp.getString(_kPersona),
       accessToken: token,
       user: cachedUser,
     );
 
     if (state.isLoggedIn) {
-      try {
-        final me = await state.api().me(token!);
-        await state.applySession(AuthSession(accessToken: token, user: me));
-        await state.syncPush();
-      } catch (_) {
-        // 过期 / 无效令牌：清会话，交给 AuthGate 回登录
-        await state.logout();
-      }
+      // 冷启动不阻塞 runApp：先用本地缓存渲染，后台校验 token（见 refreshSessionFromServer）
+      unawaited(state.refreshGroupChatConfig());
     }
     return state;
+  }
+
+  /// 启动后后台拉 /v1/auth/me；仅 401 清登录态，网络失败保留本地会话。
+  Future<void> refreshSessionFromServer() async {
+    final token = _accessToken?.trim();
+    if (token == null || token.isEmpty || _user == null) return;
+    try {
+      final me = await api()
+          .me(token)
+          .timeout(const Duration(seconds: 8));
+      await applySession(AuthSession(accessToken: token, user: me));
+    } on ApiException catch (e) {
+      if (e.isUnauthorized) await logout();
+    } on TimeoutException {
+      // 弱网保留缓存会话，避免冷启动被踢回登录
+    } catch (_) {
+      // 其它网络错误同上
+    }
   }
 
   /// 默认连 Cloudflare Tunnel（免备案 HTTPS）；设置页可改回内网联调
@@ -199,8 +381,17 @@ class AppState extends ChangeNotifier {
     await sp.setString(_kAvatarColor, session.user.avatarColor);
     await sp.setString(_kAvatarUrl, session.user.avatarUrl);
     await sp.setBool(_kProfileCompleted, session.user.profileCompleted);
+    await sp.setBool(_kOnboardingCompleted, session.user.onboardingCompleted);
+    await sp.setString(
+      _kMembership,
+      jsonEncode(session.user.membership.toJson()),
+    );
     notifyListeners();
-    await syncPush();
+    unawaited(refreshGroupChatConfig());
+    // 推送是可选能力：后台尝试，成败都不影响登录/注册主流程。
+    if (pushReminders) {
+      unawaited(syncPush());
+    }
   }
 
   Future<void> applyUser(AuthUser user) async {
@@ -210,6 +401,10 @@ class AppState extends ChangeNotifier {
 
   Future<void> logout() async {
     final uid = userId;
+    await GroupWsManager.instance.stop();
+    await KeepAliveService.instance.stop();
+    groupCache.clear();
+    PushService.instance.onGroupPush = null;
     await PushService.instance.onLogout(api: isLoggedIn ? api() : null, userId: uid);
     _accessToken = null;
     _user = null;
@@ -225,6 +420,8 @@ class AppState extends ChangeNotifier {
     await sp.remove(_kAvatarColor);
     await sp.remove(_kAvatarUrl);
     await sp.remove(_kProfileCompleted);
+    await sp.remove(_kOnboardingCompleted);
+    await sp.remove(_kMembership);
     if (uid.isNotEmpty) {
       await ChatLocalStore.instance.clearUser(uid);
     }
@@ -258,6 +455,14 @@ class AppState extends ChangeNotifier {
     await sp.setBool(_kPushReminders, v);
     notifyListeners();
     await syncPush();
+  }
+
+  Future<void> setKeepAliveBackground(bool v) async {
+    keepAliveBackground = v;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(_kKeepAlive, v);
+    notifyListeners();
+    await syncKeepAlive();
   }
 
   Future<void> syncPush() async {

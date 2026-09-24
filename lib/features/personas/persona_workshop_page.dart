@@ -93,8 +93,8 @@ class _PersonaWorkshopPageState extends State<PersonaWorkshopPage> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _openCreate,
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
+        backgroundColor: AppColors.glassLight,
+        foregroundColor: AppColors.textPrimary,
         icon: const Icon(Icons.add),
         label: const Text('创建角色'),
       ),

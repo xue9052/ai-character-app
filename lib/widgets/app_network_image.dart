@@ -45,6 +45,7 @@ class AppNetworkImage extends StatelessWidget {
     this.memCacheHeight,
     this.placeholder,
     this.errorWidget,
+    this.httpHeaders,
   });
 
   final String url;
@@ -57,12 +58,18 @@ class AppNetworkImage extends StatelessWidget {
   final Widget Function(BuildContext context, String url)? placeholder;
   final Widget Function(BuildContext context, String url, Object error)?
       errorWidget;
+  final Map<String, String>? httpHeaders;
+
+  Map<String, String> get _mergedHeaders => {
+        ...kMediaRequestHeaders,
+        if (httpHeaders != null) ...httpHeaders!,
+      };
 
   @override
   Widget build(BuildContext context) {
     return CachedNetworkImage(
       imageUrl: url,
-      httpHeaders: kMediaRequestHeaders,
+      httpHeaders: _mergedHeaders,
       cacheManager: AppImageCacheManager.instance,
       fit: fit,
       width: width,

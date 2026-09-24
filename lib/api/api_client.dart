@@ -15,6 +15,8 @@ class ApiClient {
   /// 收到 401 时回调（通常用于清登录态回到登录页）
   final FutureOr<void> Function()? onUnauthorized;
 
+  Map<String, String> authHeaders() => _headers();
+
   Map<String, String> _headers({
     bool json = false,
     bool auth = true,
@@ -26,6 +28,11 @@ class ApiClient {
     if (auth && t != null && t.isNotEmpty) {
       h['Authorization'] = 'Bearer $t';
     }
+    h.putIfAbsent(
+      'User-Agent',
+      () =>
+          'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    );
     return h;
   }
 
@@ -58,6 +65,7 @@ class ApiClient {
     return PlazaFeed(
       strip: parseList('strip', 'featured'),
       grid: parseList('grid', 'public'),
+      voiceCompanionFeatured: parseList('voice_companion_featured', 'voice_companion_featured'),
       tagPresets: [
         for (final t in (data['tag_presets'] as List? ?? const [])) '$t',
       ],
@@ -155,6 +163,7 @@ class ApiClient {
     List<String>? alternateGreetings,
     String? creatorNotes,
     String? voiceProfileId,
+    String? voiceCloneJobId,
     String? gender,
     String? scenario,
     String? appearance,
@@ -178,6 +187,8 @@ class ApiClient {
       if (creatorNotes != null && creatorNotes.trim().isNotEmpty)
         'creator_notes': creatorNotes.trim(),
       if (voiceProfileId != null) 'voice_profile_id': voiceProfileId,
+      if (voiceCloneJobId != null && voiceCloneJobId.isNotEmpty)
+        'voice_clone_job_id': voiceCloneJobId,
       if (gender != null) 'gender': gender,
       if (scenario != null) 'scenario': scenario,
       if (appearance != null) 'appearance': appearance,
@@ -324,16 +335,19 @@ class ApiClient {
     int limit = 30,
     int? beforeIndex,
     bool allowFallback = false,
+    bool seedGreeting = true,
   }) async {
     final q = <String, String>{
       'persona_id': personaId,
       'limit': '$limit',
       'allow_fallback': allowFallback ? 'true' : 'false',
+      'seed_greeting': seedGreeting ? 'true' : 'false',
       // 防 Flutter Web / 浏览器把会话预览 GET 缓存成旧数据
       '_ts': '${DateTime.now().millisecondsSinceEpoch}',
     };
     if (beforeIndex != null) {
       q['before_index'] = '$beforeIndex';
+      q['seed_greeting'] = 'false';
     }
     final res = await http.get(
       _u('/v1/users/${Uri.encodeComponent(userId)}/chat', q),
@@ -345,7 +359,29 @@ class ApiClient {
     return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
   }
 
-  /// 进聊天页：历史 + 亲密度 + 人设摘要，一次请求
+  /// 进聊天页：亲密度 + 人设摘要（与 [getChat] 并行）
+  Future<Map<String, dynamic>> getChatMeta({
+    required String userId,
+    required String personaId,
+  }) async {
+    final res = await http.get(
+      _u('/v1/users/${Uri.encodeComponent(userId)}/chat/meta', {
+        'persona_id': personaId,
+        '_ts': '${DateTime.now().millisecondsSinceEpoch}',
+      }),
+      headers: _headers(extra: const {
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      }),
+    );
+    final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载聊天资料失败');
+    }
+    return data;
+  }
+
+  /// 进聊天页：历史 + 亲密度 + 人设摘要，一次请求（旧兼容）
   Future<Map<String, dynamic>> getChatBootstrap({
     required String userId,
     required String personaId,
@@ -394,6 +430,19 @@ class ApiClient {
     ];
   }
 
+  Future<void> markInboxRead({
+    required String userId,
+    required String kind,
+    required String peerId,
+  }) async {
+    final res = await http.post(
+      _u('/v1/users/${Uri.encodeComponent(userId)}/inbox/read'),
+      headers: _headers(json: true),
+      body: jsonEncode({'kind': kind, 'peer_id': peerId}),
+    );
+    if (res.statusCode >= 400) return;
+  }
+
   Future<Map<String, dynamic>> getImageEditQuota({required String userId}) async {
     final res = await http.get(
       _u('/v1/chat/image-edit/quota', {'user_id': userId}),
@@ -418,6 +467,79 @@ class ApiClient {
         if (e is Map)
           VoiceProfileDto.fromJson(Map<String, dynamic>.from(e)),
     ];
+  }
+
+  Future<VoiceCloneRequirementsDto> voiceCloneRequirements() async {
+    final res = await http.get(_u('/v1/voice-clone/requirements'), headers: _headers(auth: false));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '获取复刻要求失败');
+    }
+    return VoiceCloneRequirementsDto.fromJson(data);
+  }
+
+  Future<VoiceCloneJobDto> createVoiceCloneJob({
+    required String userId,
+    required String filename,
+    List<int>? bytes,
+    String? filePath,
+  }) async {
+    if ((bytes == null || bytes.isEmpty) && (filePath == null || filePath.trim().isEmpty)) {
+      throw ApiException('无法读取音频文件');
+    }
+    final uri = _u('/v1/voice-clone/jobs', {'user_id': userId});
+    final req = http.MultipartRequest('POST', uri);
+    req.headers.addAll(_headers());
+    if (filePath != null && filePath.trim().isNotEmpty) {
+      req.files.add(await http.MultipartFile.fromPath('file', filePath, filename: filename));
+    } else {
+      req.files.add(http.MultipartFile.fromBytes('file', bytes!, filename: filename));
+    }
+    final streamed = await req.send().timeout(const Duration(seconds: 120));
+    final res = await http.Response.fromStream(streamed);
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '声音复刻失败');
+    }
+    final job = data['job'];
+    if (job is Map) {
+      return VoiceCloneJobDto.fromJson(Map<String, dynamic>.from(job));
+    }
+    throw ApiException('声音复刻响应异常');
+  }
+
+  Future<VoiceCloneJobDto> getVoiceCloneJob({
+    required String userId,
+    required String jobId,
+  }) async {
+    final res = await http.get(
+      _u('/v1/voice-clone/jobs/${Uri.encodeComponent(jobId)}', {'user_id': userId}),
+      headers: _headers(),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '查询复刻任务失败');
+    }
+    final job = data['job'];
+    if (job is Map) {
+      return VoiceCloneJobDto.fromJson(Map<String, dynamic>.from(job));
+    }
+    throw ApiException('复刻任务响应异常');
+  }
+
+  Future<VoiceCloneJobDto> waitVoiceCloneJob({
+    required String userId,
+    required String jobId,
+    Duration timeout = const Duration(minutes: 3),
+    Duration interval = const Duration(seconds: 2),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final job = await getVoiceCloneJob(userId: userId, jobId: jobId);
+      if (job.isReady || job.isFailed) return job;
+      await Future<void>.delayed(interval);
+    }
+    throw ApiException('声音复刻超时，请稍后重试');
   }
 
   Future<Map<String, dynamic>> chatTts({
@@ -500,6 +622,8 @@ class ApiClient {
     required dynamic message,
     String? sessionId,
     String? modelProfile,
+    bool ttsEnabled = false,
+    bool voiceBar = false,
   }) async {
     final res = await http.post(
       _u('/v1/chat'),
@@ -510,6 +634,8 @@ class ApiClient {
         'session_id': sessionId,
         'message': message,
         'model_profile': modelProfile ?? 'deepseek_default',
+        'tts_enabled': ttsEnabled,
+        'voice_bar': voiceBar,
       }),
     );
     final data = _decodeMap(res);
@@ -556,6 +682,30 @@ class ApiClient {
       _throwHttp(res, data, '加载星尘失败');
     }
     return WalletDto.fromJson(data);
+  }
+
+  Future<RechargeCatalogDto> listRechargePackages() async {
+    final res = await http.get(
+      _u('/v1/packages'),
+      headers: _headers(auth: false),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载充值套餐失败');
+    }
+    return RechargeCatalogDto.fromJson(data);
+  }
+
+  Future<VipCatalogDto> getVipCatalog() async {
+    final res = await http.get(
+      _u('/v1/membership/catalog'),
+      headers: _headers(auth: false),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载会员套餐失败');
+    }
+    return VipCatalogDto.fromJson(data);
   }
 
   /// 送礼：走 /v1/chat type=gift，返回完整 chat 响应（含 feedback / reply）
@@ -610,6 +760,7 @@ class ApiClient {
     String? sessionId,
     String? modelProfile,
     bool ttsEnabled = false,
+    bool voiceBar = false,
     void Function(Map<String, dynamic> finalPayload)? onFinal,
     void Function(String messageId)? onMessageId,
     void Function(int seq, String audioUrl, String text, bool pending, bool error)? onTtsChunk,
@@ -624,6 +775,7 @@ class ApiClient {
       'message': message,
       'model_profile': modelProfile ?? 'deepseek_default',
       'tts_enabled': ttsEnabled,
+      'voice_bar': voiceBar,
     });
     final client = http.Client();
     var messageIdSent = false;
@@ -720,6 +872,18 @@ class ApiClient {
     } finally {
       client.close();
     }
+  }
+
+  Future<Map<String, dynamic>> getSceneImageQuota(String userId) async {
+    final res = await http.get(
+      _u('/v1/scene-image/quota', {'user_id': userId}),
+      headers: _headers(),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载场景配额失败');
+    }
+    return data;
   }
 
   Future<List<MemoryItemDto>> listMemories({
@@ -985,15 +1149,61 @@ class ApiClient {
   }
 
   Future<AuthUser> me(String accessToken) async {
-    final res = await http.get(
-      _u('/v1/auth/me'),
-      headers: {'Authorization': 'Bearer $accessToken'},
-    );
+    final res = await http
+        .get(
+          _u('/v1/auth/me'),
+          headers: {'Authorization': 'Bearer $accessToken'},
+        )
+        .timeout(const Duration(seconds: 8));
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
       _throwHttp(res, data, '登录已失效，请重新登录');
     }
     return AuthUser.fromJson(Map<String, dynamic>.from(data['user'] as Map));
+  }
+
+  Future<AuthUser> updatePreferences({
+    required String accessToken,
+    String? companionPreference,
+    bool? nightMode,
+    bool? eveningGreetingEnabled,
+    bool? onboardingCompleted,
+  }) async {
+    final body = <String, dynamic>{};
+    if (companionPreference != null) {
+      body['companion_preference'] = companionPreference;
+    }
+    if (nightMode != null) body['night_mode'] = nightMode;
+    if (eveningGreetingEnabled != null) {
+      body['evening_greeting_enabled'] = eveningGreetingEnabled;
+    }
+    if (onboardingCompleted != null) {
+      body['onboarding_completed'] = onboardingCompleted;
+    }
+    final res = await http.patch(
+      _u('/v1/auth/me/preferences'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $accessToken',
+      },
+      body: jsonEncode(body),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '保存偏好失败');
+    }
+    return AuthUser.fromJson(Map<String, dynamic>.from(data['user'] as Map));
+  }
+
+  Future<OnboardingConfig> onboardingConfig() async {
+    final res = await http
+        .get(_u('/v1/app/onboarding-config'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载引导配置失败');
+    }
+    return OnboardingConfig.fromJson(data);
   }
 
   Future<AuthUser> updateMe({
@@ -1031,8 +1241,9 @@ class ApiClient {
     req.files.add(
       http.MultipartFile.fromBytes('file', bytes, filename: filename),
     );
-    final streamed = await req.send();
-    final res = await http.Response.fromStream(streamed);
+    final streamed = await req.send().timeout(const Duration(seconds: 90));
+    final res = await http.Response.fromStream(streamed)
+        .timeout(const Duration(seconds: 30));
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
       _throwHttp(res, data, '上传失败');
@@ -1103,7 +1314,9 @@ class ApiClient {
   }
 
   Future<List<AvatarPreset>> avatarPresets() async {
-    final res = await http.get(_u('/v1/auth/avatar-presets'));
+    final res = await http
+        .get(_u('/v1/auth/avatar-presets'))
+        .timeout(const Duration(seconds: 20));
     final data = _decodeMap(res);
     if (res.statusCode >= 400) {
       _throwHttp(res, data, '加载头像失败');
@@ -1189,6 +1402,361 @@ class ApiClient {
     }
     if (res.statusCode >= 400) {
       _throwHttp(res, data, '挂断失败');
+    }
+    return data;
+  }
+}
+
+extension GroupChatApi on ApiClient {
+  Future<GroupChatConfig> getGroupChatConfig() async {
+    final res = await http
+        .get(_u('/v1/groups/config'), headers: _headers())
+        .timeout(const Duration(seconds: 15));
+    final data = _decodeMap(res);
+    if (res.statusCode == 401) {
+      await onUnauthorized?.call();
+      _throwHttp(res, data, '登录已失效');
+    }
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载群聊配置失败');
+    }
+    return GroupChatConfig.fromJson(data);
+  }
+
+  Future<List<PersonaSummary>> getGroupCandidates() async {
+    final res = await http
+        .get(_u('/v1/groups/candidates'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载候选数字人失败');
+    }
+    final rows = data['personas'] as List? ?? const [];
+    return [
+      for (final p in rows)
+        PersonaSummary.fromJson(Map<String, dynamic>.from(p as Map)),
+    ];
+  }
+
+  Future<List<GroupSummaryDto>> listGroups() async {
+    final res = await http
+        .get(_u('/v1/groups'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载群列表失败');
+    }
+    final rows = data['groups'] as List? ?? const [];
+    return [
+      for (final g in rows)
+        GroupSummaryDto.fromJson(Map<String, dynamic>.from(g as Map)),
+    ];
+  }
+
+  Future<Map<String, dynamic>> createGroup({
+    List<String> personaIds = const [],
+    String title = '',
+  }) async {
+    final res = await http
+        .post(
+          _u('/v1/groups'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            'persona_ids': personaIds,
+            if (title.trim().isNotEmpty) 'title': title.trim(),
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '建群失败');
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> getGroupDetail(String groupId) async {
+    final res = await http
+        .get(_u('/v1/groups/$groupId'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载群详情失败');
+    }
+    return data;
+  }
+
+  Future<GroupSummaryDto> patchGroupTitle(String groupId, String title) async {
+    final res = await http
+        .patch(
+          _u('/v1/groups/$groupId'),
+          headers: _headers(json: true),
+          body: jsonEncode({'title': title}),
+        )
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '改名失败');
+    }
+    return GroupSummaryDto.fromJson(
+      Map<String, dynamic>.from(data['group'] as Map),
+    );
+  }
+
+  Future<GroupSummaryDto> uploadGroupCover(
+    String groupId, {
+    required List<int> bytes,
+    required String filename,
+  }) async {
+    final req = http.MultipartRequest('POST', _u('/v1/groups/$groupId/cover'));
+    final h = _headers();
+    req.headers.addAll(h);
+    req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+    final streamed = await req.send().timeout(const Duration(seconds: 90));
+    final res = await http.Response.fromStream(streamed);
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '上传群头像失败');
+    }
+    return GroupSummaryDto.fromJson(
+      Map<String, dynamic>.from(data['group'] as Map),
+    );
+  }
+
+  Future<GroupSummaryDto> deleteGroupCover(String groupId) async {
+    final res = await http
+        .delete(_u('/v1/groups/$groupId/cover'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '清除群头像失败');
+    }
+    return GroupSummaryDto.fromJson(
+      Map<String, dynamic>.from(data['group'] as Map),
+    );
+  }
+
+  Future<GroupSummaryDto> addGroupMember(String groupId, String personaId) async {
+    final res = await http
+        .post(
+          _u('/v1/groups/$groupId/members'),
+          headers: _headers(json: true),
+          body: jsonEncode({'persona_id': personaId}),
+        )
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加人失败');
+    }
+    return GroupSummaryDto.fromJson(
+      Map<String, dynamic>.from(data['group'] as Map),
+    );
+  }
+
+  Future<GroupSummaryDto> removeGroupMember(
+    String groupId,
+    String personaId,
+  ) async {
+    final res = await http
+        .delete(
+          _u('/v1/groups/$groupId/members/$personaId'),
+          headers: _headers(),
+        )
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '移人失败');
+    }
+    return GroupSummaryDto.fromJson(
+      Map<String, dynamic>.from(data['group'] as Map),
+    );
+  }
+
+  Future<void> dissolveGroup(String groupId) async {
+    final res = await http
+        .delete(_u('/v1/groups/$groupId'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '解散失败');
+    }
+  }
+
+  Future<String> issueGroupImWsTicket() async {
+    final res = await http
+        .post(_u('/v1/groups/ws-ticket'), headers: _headers())
+        .timeout(const Duration(seconds: 15));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '获取连接凭证失败');
+    }
+    return '${data['ticket'] ?? ''}';
+  }
+
+  Future<Map<String, dynamic>> sendGroupMessage({
+    required String groupId,
+    required String content,
+    String clientMsgId = '',
+  }) async {
+    final res = await http
+        .post(
+          _u('/v1/groups/$groupId/messages'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            'content': content,
+            if (clientMsgId.isNotEmpty) 'client_msg_id': clientMsgId,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '发送失败');
+    }
+    return data;
+  }
+
+  String groupImWsUrl(String ticket) {
+    final b = baseUrl.replaceAll(RegExp(r'/$'), '');
+    final ws = b.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
+    return '$ws/v1/groups/ws?ticket=${Uri.encodeQueryComponent(ticket)}';
+  }
+
+  Future<Map<String, dynamic>> sendGroupGift({
+    required String groupId,
+    required List<String> personaIds,
+    String giftId = 'rose',
+  }) async {
+    final res = await http
+        .post(
+          _u('/v1/groups/$groupId/gifts'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            'persona_ids': personaIds,
+            'gift_id': giftId,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '送礼失败');
+    }
+    return data;
+  }
+
+  /// 吃醋/冷战中的成员：送花化解。降幅比普通送礼大，且不牵连其他人。
+  Future<Map<String, dynamic>> resolveGroupJealousy({
+    required String groupId,
+    required String personaId,
+    String giftId = '',
+  }) async {
+    final res = await http
+        .post(
+          _u('/v1/groups/$groupId/resolve'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            'persona_id': personaId,
+            if (giftId.isNotEmpty) 'gift_id': giftId,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '化解失败');
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> sendGroupImage({
+    required String groupId,
+    required List<int> bytes,
+    required String filename,
+    String caption = '',
+    String clientMsgId = '',
+  }) async {
+    final req = http.MultipartRequest(
+      'POST',
+      _u('/v1/groups/$groupId/images'),
+    );
+    req.headers.addAll(_headers());
+    req.fields['caption'] = caption;
+    if (clientMsgId.isNotEmpty) {
+      req.fields['client_msg_id'] = clientMsgId;
+    }
+    req.files.add(
+      http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: filename,
+      ),
+    );
+    final streamed = await req.send().timeout(const Duration(seconds: 60));
+    final res = await http.Response.fromStream(streamed);
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '发送图片失败');
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> rememberGroupMessage({
+    required String groupId,
+    required String messageId,
+    String note = '',
+  }) async {
+    final res = await http
+        .post(
+          _u('/v1/groups/$groupId/memories'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            'message_id': messageId,
+            if (note.isNotEmpty) 'note': note,
+          }),
+        )
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '记住失败');
+    }
+    return data;
+  }
+
+  Future<List<GroupMemoryDto>> listGroupMemories(String groupId) async {
+    final res = await http
+        .get(
+          _u('/v1/groups/$groupId/memories'),
+          headers: _headers(),
+        )
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '加载群记忆失败');
+    }
+    final raw = (data['memories'] as List?) ?? const [];
+    return [
+      for (final item in raw)
+        GroupMemoryDto.fromJson(Map<String, dynamic>.from(item as Map)),
+    ];
+  }
+
+  Future<Map<String, dynamic>> rememberChatMessage({
+    required String userId,
+    required String personaId,
+    required String messageId,
+    String note = '',
+  }) async {
+    final res = await http
+        .post(
+          _u('/v1/users/${Uri.encodeComponent(userId)}/chat/remember'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            'persona_id': personaId,
+            'message_id': messageId,
+            if (note.isNotEmpty) 'note': note,
+          }),
+        )
+        .timeout(const Duration(seconds: 20));
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) {
+      _throwHttp(res, data, '记住失败');
     }
     return data;
   }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_exception.dart';
 import '../../services/app_state.dart';
+import '../../theme/app_widgets.dart';
 
 class RebindEmailPage extends StatefulWidget {
   const RebindEmailPage({super.key});
@@ -151,7 +152,8 @@ class _RebindEmailPageState extends State<RebindEmailPage> {
                 ),
               ),
               const SizedBox(width: 8),
-              FilledButton.tonal(
+              FrostButton(
+                expanded: false,
                 onPressed: (_sending || _cooldown > 0) ? null : _sendCode,
                 child: Text(
                   _cooldown > 0
@@ -180,7 +182,7 @@ class _RebindEmailPageState extends State<RebindEmailPage> {
             ),
           ),
           const SizedBox(height: 20),
-          FilledButton(
+          FrostButton(
             onPressed: _busy ? null : _submit,
             child: Text(_busy ? '提交中…' : '确认换绑'),
           ),

@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_client.dart';
 import '../../api/api_exception.dart';
+import '../../services/dev_flags.dart';
 import '../../services/zego_rtc.dart';
 import '../../services/app_state.dart';
 import '../../theme/app_theme.dart';
+import '../personas/persona_cover.dart';
+import 'chat_backdrop.dart';
 
 /// 语音通话页：对接 /v1/calls/start|hangup + ZEGO Express RTC。
 class VoiceCallPage extends StatefulWidget {
@@ -19,6 +22,12 @@ class VoiceCallPage extends StatefulWidget {
     required this.accessToken,
     required this.baseUrl,
     this.sessionId,
+    this.coverUrl,
+    this.coverEmoji,
+    this.coverColor,
+    this.backgroundKey,
+    this.backgroundUrl,
+    this.oneLiner,
   });
 
   final String personaId;
@@ -26,6 +35,12 @@ class VoiceCallPage extends StatefulWidget {
   final String accessToken;
   final String baseUrl;
   final String? sessionId;
+  final String? coverUrl;
+  final String? coverEmoji;
+  final String? coverColor;
+  final String? backgroundKey;
+  final String? backgroundUrl;
+  final String? oneLiner;
 
   @override
   State<VoiceCallPage> createState() => _VoiceCallPageState();
@@ -52,7 +67,10 @@ class _VoiceCallPageState extends State<VoiceCallPage> {
   void initState() {
     super.initState();
     _api = ApiClient(widget.baseUrl, accessToken: widget.accessToken);
-    _debugLine = '${VoiceCallPage.buildTag} · ${widget.baseUrl}';
+    // 构建号与服务器地址只给开发选项看，正式用户界面不暴露
+    if (DevFlags.showDevTools) {
+      _debugLine = '${VoiceCallPage.buildTag} · ${widget.baseUrl}';
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _bootstrap();
     });
@@ -68,6 +86,23 @@ class _VoiceCallPageState extends State<VoiceCallPage> {
       _rtc?.leave();
     }
     super.dispose();
+  }
+
+  Color get _personaCoverBg {
+    final hex = (widget.coverColor ?? '#7B6CF6').replaceFirst('#', '');
+    try {
+      return Color(int.parse(hex, radix: 16) + 0xFF000000);
+    } catch (_) {
+      return AppColors.primary;
+    }
+  }
+
+  String get _personaFallbackLabel {
+    if (widget.coverEmoji != null && widget.coverEmoji!.isNotEmpty) {
+      return widget.coverEmoji!;
+    }
+    final name = widget.personaName;
+    return name.isNotEmpty ? name.substring(0, 1) : '?';
   }
 
   int _parseAppId(dynamic raw) {
@@ -119,8 +154,9 @@ class _VoiceCallPageState extends State<VoiceCallPage> {
     _watchdog = Timer(const Duration(seconds: 35), () {
       if (!mounted || !_loading) return;
       setState(() {
-        _error =
-            '连接超时（$_statusHint）。请确认已安装最新 APK，且服务器为 ${widget.baseUrl}';
+        _error = DevFlags.showDevTools
+            ? '连接超时（$_statusHint）。请确认已安装最新 APK，且服务器为 ${widget.baseUrl}'
+            : '连接超时，请检查网络后重试';
         _loading = false;
       });
     });
@@ -242,127 +278,188 @@ class _VoiceCallPageState extends State<VoiceCallPage> {
   Widget build(BuildContext context) {
     final name = widget.personaName;
     return Scaffold(
-      backgroundColor: const Color(0xFF0E0E1A),
+      backgroundColor: Colors.transparent,
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
+        backgroundColor: Colors.black.withValues(alpha: 0.25),
+        elevation: 0,
         foregroundColor: Colors.white,
-        title: Text('与 $name 语音通话'),
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              const Spacer(),
-              CircleAvatar(
-                radius: 48,
-                backgroundColor: AppColors.primary.withValues(alpha: 0.25),
-                child: Text(
-                  name.isNotEmpty ? name[0] : '?',
-                  style: const TextStyle(fontSize: 36, color: Colors.white),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                name,
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 8),
-              if (_loading)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Column(
-                    children: [
-                      const CircularProgressIndicator(color: Colors.white54),
-                      const SizedBox(height: 12),
-                      Text(
-                        _statusHint,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.65),
-                        ),
-                      ),
-                      if (_debugLine.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          _debugLine,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.white.withValues(alpha: 0.35),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                )
-              else if (_error != null)
-                Text(
-                  _error!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.redAccent),
-                )
-              else if (_inCall) ...[
-                Text(
-                  _formatDuration(_elapsedSec),
-                  style: TextStyle(
-                    fontSize: 40,
-                    fontWeight: FontWeight.w300,
-                    color: Colors.white.withValues(alpha: 0.9),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '剩余免费 ${_freeRemainingSec ~/ 60} 分 ${_freeRemainingSec % 60} 秒',
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.55)),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  _rtcReady
-                      ? (_statusHint.isNotEmpty ? _statusHint : '通话中 · 请直接说话')
-                      : (_statusHint.isNotEmpty ? _statusHint : '正在连接音频通道…'),
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.white.withValues(alpha: 0.55),
-                  ),
-                ),
-              ],
-              const Spacer(),
-              if (_inCall)
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.redAccent,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
+        title: Row(
+          children: [
+            PersonaCoverAvatar(
+              baseUrl: widget.baseUrl,
+              coverUrl: widget.coverUrl,
+              fallbackColor: _personaCoverBg,
+              fallbackLabel: _personaFallbackLabel,
+              radius: 18,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
                     ),
-                    onPressed: _hangingUp ? null : () => _hangup(),
-                    icon: _hangingUp
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.call_end),
-                    label: Text(_hangingUp ? '挂断中…' : '挂断'),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                )
-              else if (_error != null)
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('返回'),
+                  Text(
+                    _inCall
+                        ? (_rtcReady ? '语音通话中' : '正在连接…')
+                        : (_loading ? '正在拨号…' : '语音通话'),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.white.withValues(alpha: 0.55),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-            ],
-          ),
+                ],
+              ),
+            ),
+          ],
         ),
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          ChatBackdrop(
+            baseUrl: widget.baseUrl,
+            backgroundKey: widget.backgroundKey,
+            backgroundUrl: widget.backgroundUrl,
+            coverUrl: widget.coverUrl,
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+              child: Column(
+                children: [
+                  const Spacer(),
+                  PersonaCoverAvatar(
+                    baseUrl: widget.baseUrl,
+                    coverUrl: widget.coverUrl,
+                    fallbackColor: _personaCoverBg,
+                    fallbackLabel: _personaFallbackLabel,
+                    radius: 40,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    name,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                  if (widget.oneLiner != null && widget.oneLiner!.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      widget.oneLiner!,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.55),
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  if (_loading)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Column(
+                        children: [
+                          const CircularProgressIndicator(color: Colors.white54),
+                          const SizedBox(height: 12),
+                          Text(
+                            _statusHint,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.65),
+                            ),
+                          ),
+                          if (_debugLine.isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              _debugLine,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.white.withValues(alpha: 0.35),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    )
+                  else if (_error != null)
+                    Text(
+                      _error!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.redAccent),
+                    )
+                  else if (_inCall) ...[
+                    Text(
+                      _formatDuration(_elapsedSec),
+                      style: TextStyle(
+                        fontSize: 40,
+                        fontWeight: FontWeight.w300,
+                        color: Colors.white.withValues(alpha: 0.9),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '剩余免费 ${_freeRemainingSec ~/ 60} 分 ${_freeRemainingSec % 60} 秒',
+                      style: TextStyle(color: Colors.white.withValues(alpha: 0.55)),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      _rtcReady
+                          ? (_statusHint.isNotEmpty ? _statusHint : '通话中 · 请直接说话')
+                          : (_statusHint.isNotEmpty ? _statusHint : '正在连接音频通道…'),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.white.withValues(alpha: 0.55),
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  if (_inCall)
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                        onPressed: _hangingUp ? null : () => _hangup(),
+                        icon: _hangingUp
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.call_end),
+                        label: Text(_hangingUp ? '挂断中…' : '挂断'),
+                      ),
+                    )
+                  else if (_error != null)
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('返回'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

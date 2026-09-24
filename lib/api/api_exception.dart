@@ -23,13 +23,16 @@ String apiErrorMessage(Object error) {
   if (error is ApiException) return error.message;
   final raw = '$error';
   final s = raw.toLowerCase();
+  if (s.contains('timed out') || s.contains('timeout')) {
+    return '请求超时：声音复刻可能需要 1–2 分钟，请保持网络畅通后重试';
+  }
   if (s.contains('failed host lookup') ||
       s.contains('connection refused') ||
       s.contains('connection timed out') ||
       s.contains('network is unreachable') ||
       s.contains('socketexception') ||
       s.contains('clientexception')) {
-    return '无法连接服务器：请确认 API 地址、手机与电脑同一 Wi‑Fi，且后端已用 --host 0.0.0.0 启动';
+    return '无法连接服务器：请确认设置里 API 为 https://905299378.xyz，且手机网络正常';
   }
   if (raw.contains('HTTP 404') &&
       (raw.contains('Not Found') || raw.toLowerCase().contains('not found'))) {
