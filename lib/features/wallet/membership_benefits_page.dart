@@ -1,7 +1,11 @@
 import 'dart:io' show Platform;
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:in_app_purchase/in_app_purchase.dart';
+import 'package:in_app_purchase_storekit/in_app_purchase_storekit.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../api/api_exception.dart';
 import '../../api/models.dart';
@@ -31,6 +35,10 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
   VipCatalogDto? _catalog;
   int _selected = 0;
   int? _stardust;
+  final InAppPurchase _store = InAppPurchase.instance;
+  StreamSubscription<List<PurchaseDetails>>? _purchaseSubscription;
+  final Map<String, ProductDetails> _storeProducts = {};
+  bool _purchasing = false;
 
   bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
@@ -44,7 +52,59 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
   @override
   void initState() {
     super.initState();
+    _purchaseSubscription = _store.purchaseStream.listen(
+      _onPurchaseUpdates,
+      onError: (Object error) {
+        if (mounted) _showPurchaseMessage('Apple 购买状态读取失败：$error');
+      },
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _purchaseSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _showPurchaseMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _onPurchaseUpdates(List<PurchaseDetails> purchases) async {
+    for (final purchase in purchases) {
+      if (purchase.status == PurchaseStatus.pending) {
+        if (mounted) setState(() => _purchasing = true);
+        continue;
+      }
+      if (purchase.status == PurchaseStatus.error) {
+        _showPurchaseMessage(purchase.error?.message ?? 'Apple 购买失败');
+      } else if (purchase.status == PurchaseStatus.canceled) {
+        _showPurchaseMessage('已取消购买');
+      } else if (purchase.status == PurchaseStatus.purchased ||
+          purchase.status == PurchaseStatus.restored) {
+        try {
+          final jws = purchase.verificationData.serverVerificationData;
+          if (!jws.contains('.')) {
+            throw StateError('StoreKit 未返回交易 JWS，请确认运行的是 StoreKit 2');
+          }
+          final s = AppStateScope.of(context);
+          await s.api().verifyApplePurchase(jws);
+          await s.refreshSessionFromServer();
+          await _load();
+          _showPurchaseMessage('购买已验证，会员和星尘已到账');
+          if (purchase.pendingCompletePurchase) {
+            await _store.completePurchase(purchase);
+          }
+        } catch (e) {
+          // 不 complete：StoreKit 下次启动会再次投递未完成交易。
+          _showPurchaseMessage('购买已完成，但验证暂未成功：$e');
+        }
+      }
+      if (mounted) setState(() => _purchasing = false);
+    }
   }
 
   Future<void> _load() async {
@@ -57,6 +117,18 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
       final catalogFut = s.api().getVipCatalog();
       final walletFut = s.api().getWallet(userId: s.userId);
       final catalog = await catalogFut;
+      if (!kIsWeb && Platform.isIOS && catalog.purchaseEnabled) {
+        final ids = catalog.subscriptions
+            .map((item) => item.appleProductId)
+            .where((id) => id.isNotEmpty)
+            .toSet();
+        if (ids.isNotEmpty && await _store.isAvailable()) {
+          final products = await _store.queryProductDetails(ids);
+          _storeProducts
+            ..clear()
+            ..addEntries(products.productDetails.map((p) => MapEntry(p.id, p)));
+        }
+      }
       WalletDto? wallet;
       try {
         wallet = await walletFut;
@@ -94,9 +166,48 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
     return '¥${v.toStringAsFixed(1)}';
   }
 
-  void _onPay() {
+  String _planPrice(VipSubscriptionDto? plan) {
+    if (plan == null) return '';
+    final storePrice = _storeProducts[plan.appleProductId]?.price;
+    return storePrice ?? _fmtPrice(plan.priceCny);
+  }
+
+  Future<void> _onPay() async {
     final plan = _plan;
     if (plan == null) return;
+    if (!kIsWeb && Platform.isIOS && _catalog?.purchaseEnabled == true) {
+      final s = AppStateScope.of(context);
+      final productId = plan.appleProductId.trim();
+      if (productId.isEmpty) {
+        _showPurchaseMessage('后台尚未配置该套餐的 Apple 商品 ID');
+        return;
+      }
+      setState(() => _purchasing = true);
+      try {
+        if (!await _store.isAvailable()) throw StateError('App Store 当前不可用');
+        final response = await _store.queryProductDetails({productId});
+        if (response.error != null || response.productDetails.isEmpty) {
+          throw StateError(
+              response.error?.message ?? 'App Store 未找到商品 $productId');
+        }
+        _storeProducts[productId] = response.productDetails.first;
+        final accountToken = const Uuid().v5(
+          Namespace.url.value,
+          'ai-character-app:${s.userId}',
+        );
+        final launched = await _store.buyNonConsumable(
+          purchaseParam: Sk2PurchaseParam(
+            productDetails: response.productDetails.first,
+            applicationUserName: accountToken,
+          ),
+        );
+        if (!launched) throw StateError('Apple 没有启动购买流程');
+      } catch (e) {
+        if (mounted) setState(() => _purchasing = false);
+        _showPurchaseMessage('无法开始购买：$e');
+      }
+      return;
+    }
     final hint = (_catalog?.contactHint ?? '').trim().isNotEmpty
         ? _catalog!.contactHint
         : '当前内测期由客服后台开通 VIP。';
@@ -108,9 +219,9 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
         content: Text(
           _isAndroid
               ? 'Android 端暂不支持在线开通。\n'
-                  '已选「${plan.title}」（${_fmtPrice(plan.priceCny)}），'
+                  '已选「${plan.title}」（${_planPrice(plan)}），'
                   '开通后赠送 ${plan.stardustGift} 星尘。\n$hint'
-              : '已选「${plan.title}」（${_fmtPrice(plan.priceCny)}），'
+              : '已选「${plan.title}」（${_planPrice(plan)}），'
                   '开通后赠送 ${plan.stardustGift} 星尘。\n$hint',
         ),
         actions: [
@@ -128,9 +239,8 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
     final s = AppStateScope.of(context);
     final u = s.user;
     final m = widget.membership;
-    final name = (u?.nickname.trim().isNotEmpty == true)
-        ? u!.nickname.trim()
-        : '我';
+    final name =
+        (u?.nickname.trim().isNotEmpty == true) ? u!.nickname.trim() : '我';
 
     return Scaffold(
       backgroundColor: AppColors.bgDark,
@@ -324,7 +434,7 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  _fmtPrice(plan.priceCny),
+                  _planPrice(plan),
                   style: TextStyle(
                     color: fg,
                     fontSize: 22,
@@ -530,7 +640,7 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
               width: double.infinity,
               height: 50,
               child: FilledButton(
-                onPressed: plan == null ? null : _onPay,
+                onPressed: plan == null || _purchasing ? null : _onPay,
                 style: FilledButton.styleFrom(
                   backgroundColor: _peach,
                   foregroundColor: const Color(0xFF2A1F1C),
@@ -544,13 +654,15 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
                 child: Text(
                   plan == null
                       ? '立即开通'
-                      : '立即开通 ${_fmtPrice(plan.priceCny)} · 送 ${plan.stardustGift} 星尘',
+                      : '立即开通 ${_planPrice(plan)} · 送 ${plan.stardustGift} 星尘',
                 ),
               ),
             ),
             const SizedBox(height: 10),
-            const Text(
-              '开通即表示同意会员服务约定 · 当前由客服开通',
+            Text(
+              _catalog?.purchaseEnabled == true && !kIsWeb && Platform.isIOS
+                  ? '开通即表示同意会员服务约定 · 由 Apple 安全处理付款'
+                  : '开通即表示同意会员服务约定 · 当前由客服开通',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: AppColors.textMuted,

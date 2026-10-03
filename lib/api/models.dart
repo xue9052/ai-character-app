@@ -27,9 +27,8 @@ class Membership {
   factory Membership.fromJson(Map<String, dynamic> j) => Membership(
         tier: '${j['tier'] ?? 'free'}',
         label: '${j['label'] ?? '体验'}',
-        expiresAt: j['expires_at'] == null
-            ? null
-            : int.tryParse('${j['expires_at']}'),
+        expiresAt:
+            j['expires_at'] == null ? null : int.tryParse('${j['expires_at']}'),
         isMember: j['is_member'] == true,
         expired: j['expired'] == true,
       );
@@ -170,14 +169,14 @@ class PersonaSummary {
   final bool recentChatted;
 
   bool get isOfficial =>
-      id == 'aurora' ||
-      source == 'builtin' ||
-      ownerUserId == 'u_seed_official';
+      id == 'aurora' || source == 'builtin' || ownerUserId == 'u_seed_official';
   bool get isCustom => source == 'custom' || id.startsWith('c_');
   bool get isPending => reviewStatus == 'pending';
   bool get isRejected => reviewStatus == 'rejected';
   bool get isApproved =>
-      reviewStatus == null || reviewStatus == 'approved' || reviewStatus!.isEmpty;
+      reviewStatus == null ||
+      reviewStatus == 'approved' ||
+      reviewStatus!.isEmpty;
   bool get isPrivate => visibility == 'private';
   bool get isPublic => visibility == 'public' || visibility == null;
 
@@ -361,9 +360,7 @@ class PersonaDetail {
   final String? speechStyle;
 
   bool get isOfficial =>
-      id == 'aurora' ||
-      source == 'builtin' ||
-      ownerUserId == 'u_seed_official';
+      id == 'aurora' || source == 'builtin' || ownerUserId == 'u_seed_official';
   bool get isCustom => source == 'custom' || id.startsWith('c_');
   bool get isPending => reviewStatus == 'pending';
   bool get isRejected => reviewStatus == 'rejected';
@@ -400,12 +397,14 @@ class PersonaDetail {
         alternateGreetings: [
           for (final g in (j['alternate_greetings'] as List? ?? const [])) '$g',
         ],
-        voiceProfileId: (j['voice_profile_id'] as String?)?.trim().isEmpty == true
-            ? null
-            : j['voice_profile_id'] as String?,
-        cosyvoiceVoice: (j['cosyvoice_voice'] as String?)?.trim().isEmpty == true
-            ? null
-            : j['cosyvoice_voice'] as String?,
+        voiceProfileId:
+            (j['voice_profile_id'] as String?)?.trim().isEmpty == true
+                ? null
+                : j['voice_profile_id'] as String?,
+        cosyvoiceVoice:
+            (j['cosyvoice_voice'] as String?)?.trim().isEmpty == true
+                ? null
+                : j['cosyvoice_voice'] as String?,
         gender: (j['gender'] as String?)?.trim().isEmpty == true
             ? null
             : j['gender'] as String?,
@@ -415,9 +414,10 @@ class PersonaDetail {
         appearance: (j['appearance'] as String?)?.trim().isEmpty == true
             ? null
             : j['appearance'] as String?,
-        relationshipToUser: (j['relationship_to_user'] as String?)?.trim().isEmpty == true
-            ? null
-            : j['relationship_to_user'] as String?,
+        relationshipToUser:
+            (j['relationship_to_user'] as String?)?.trim().isEmpty == true
+                ? null
+                : j['relationship_to_user'] as String?,
         personality: [
           for (final t in (j['personality'] as List? ?? const [])) '$t',
         ],
@@ -458,6 +458,7 @@ class LookStyle {
     required this.category,
     required this.color,
     this.badge = '',
+    this.previewUrl = '',
   });
 
   final String key;
@@ -465,6 +466,7 @@ class LookStyle {
   final String category;
   final String color;
   final String badge;
+  final String previewUrl;
 
   factory LookStyle.fromJson(Map<String, dynamic> j) => LookStyle(
         key: '${j['key']}',
@@ -472,6 +474,7 @@ class LookStyle {
         category: '${j['category'] ?? '精选'}',
         color: '${j['color'] ?? '#5B7C99'}',
         badge: '${j['badge'] ?? ''}',
+        previewUrl: '${j['preview_url'] ?? ''}',
       );
 }
 
@@ -481,7 +484,8 @@ class LookStylesPayload {
   final List<String> categories;
   final List<LookStyle> styles;
 
-  factory LookStylesPayload.fromJson(Map<String, dynamic> j) => LookStylesPayload(
+  factory LookStylesPayload.fromJson(Map<String, dynamic> j) =>
+      LookStylesPayload(
         categories: [
           for (final c in (j['categories'] as List? ?? const [])) '$c',
         ],
@@ -519,7 +523,6 @@ class GeneratedLook {
   }
 }
 
-
 class ChatMessageDto {
   ChatMessageDto({
     this.id,
@@ -546,7 +549,9 @@ class ChatMessageDto {
   final Map<String, dynamic> payload;
 
   bool get isMemory =>
-      type == 'memory' || meta['memory_card'] == true || meta['kind'] == 'memory_card';
+      type == 'memory' ||
+      meta['memory_card'] == true ||
+      meta['kind'] == 'memory_card';
 
   bool get isSceneImage => meta['scene_image'] != null;
 
@@ -565,7 +570,8 @@ class ChatMessageDto {
   }
 
   String get memorySummary =>
-      '${payload['summary'] ?? payload['text'] ?? meta['summary'] ?? ''}'.trim();
+      '${payload['summary'] ?? payload['text'] ?? meta['summary'] ?? ''}'
+          .trim();
 
   String get memoryImageUrl =>
       '${payload['image_url'] ?? meta['image_url'] ?? ''}'.trim();
@@ -713,7 +719,9 @@ class VoiceCloneRequirementsDto {
       VoiceCloneRequirementsDto(
         targetModel: '${j['target_model'] ?? 'cosyvoice-v3.5-flash'}',
         formats: [
-          for (final f in (j['formats'] as List? ?? const ['wav', 'mp3', 'm4a'])) '$f',
+          for (final f
+              in (j['formats'] as List? ?? const ['wav', 'mp3', 'm4a']))
+            '$f',
         ],
         minSeconds: (j['min_seconds'] as num?)?.toDouble() ?? 10,
         maxSeconds: (j['max_seconds'] as num?)?.toDouble() ?? 30,
@@ -909,6 +917,7 @@ class VipSubscriptionDto {
     this.originalPriceCny = 0,
     this.badge = '',
     this.stardustGift = 0,
+    this.appleProductId = '',
   });
 
   final String id;
@@ -919,6 +928,7 @@ class VipSubscriptionDto {
   final double originalPriceCny;
   final String badge;
   final int stardustGift;
+  final String appleProductId;
 
   factory VipSubscriptionDto.fromJson(Map<String, dynamic> j) =>
       VipSubscriptionDto(
@@ -930,6 +940,7 @@ class VipSubscriptionDto {
         originalPriceCny: (j['original_price_cny'] as num?)?.toDouble() ?? 0,
         badge: '${j['badge'] ?? ''}'.trim(),
         stardustGift: (j['stardust_gift'] as num?)?.toInt() ?? 0,
+        appleProductId: '${j['apple_product_id'] ?? ''}',
       );
 }
 
@@ -1016,7 +1027,8 @@ class BondDto {
 
   factory BondDto.fromJson(Map<String, dynamic> j) {
     final stickers = (j['stickers'] as List? ?? const [])
-        .map((e) => BondStickerDto.fromJson(Map<String, dynamic>.from(e as Map)))
+        .map(
+            (e) => BondStickerDto.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
     final extras = (j['quick_replies_extra'] as List? ?? const [])
         .map((e) => '$e')
@@ -1256,15 +1268,13 @@ class GroupMessageDto {
   String get imageUrl => '${meta['image_url'] ?? ''}';
   String get giftName => '${meta['gift_name'] ?? ''}';
   String get giftPersonaName => '${meta['persona_name'] ?? ''}';
-  bool get isMemory =>
-      messageType == 'memory' || kind == 'memory_card';
+  bool get isMemory => messageType == 'memory' || kind == 'memory_card';
   bool get isSceneImage => kind == 'scene_image';
   String get sceneTitle => '${meta['scene_title'] ?? ''}';
   String get memorySummary => '${meta['summary'] ?? ''}';
   bool get isAiGift => meta['ai_gift'] == true;
   String get audioUrl => '${meta['audio_url'] ?? ''}';
-  bool get hasVoiceReply =>
-      audioUrl.isNotEmpty || meta['voice_reply'] == true;
+  bool get hasVoiceReply => audioUrl.isNotEmpty || meta['voice_reply'] == true;
 
   factory GroupMessageDto.fromJson(Map<String, dynamic> j) => GroupMessageDto(
         id: '${j['id']}',

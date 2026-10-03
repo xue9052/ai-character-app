@@ -1,4 +1,4 @@
-# iOS：Compile 验证编译；Signed IPA 需 Apple 证书 Secrets（手动勾选）
+# iOS：main/master 推送后编译并签名 IPA；需要 Apple 证书 Secrets。
 
 name: iOS Build
 
@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       build_signed_ipa:
-        description: "打签名 ipa（须先配 IOS_* Secrets 与 ExportOptions.plist）"
+        description: "打签名 ipa（须先配置 IOS_* Secrets 与 ExportOptions.plist）"
         required: false
-        default: false
+        default: true
         type: boolean
 
 concurrency:
@@ -36,7 +36,9 @@ jobs:
   ipa:
     name: Signed IPA
     needs: compile
-    if: github.event_name == 'workflow_dispatch' && inputs.build_signed_ipa == true
+    if: >-
+      (github.event_name == 'push' && contains(fromJSON('["main","master"]'), github.ref_name)) ||
+      (github.event_name == 'workflow_dispatch' && inputs.build_signed_ipa == true)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

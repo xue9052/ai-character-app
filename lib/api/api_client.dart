@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'api_exception.dart';
+
+import 'api_exception.dart';
 import 'models.dart';
 
 class ApiClient {
@@ -706,6 +708,18 @@ class ApiClient {
       _throwHttp(res, data, '加载会员套餐失败');
     }
     return VipCatalogDto.fromJson(data);
+  }
+
+  Future<Map<String, dynamic>> verifyApplePurchase(
+      String signedTransaction) async {
+    final res = await http.post(
+      _u('/v1/iap/apple/verify'),
+      headers: _headers(json: true),
+      body: jsonEncode({'signed_transaction': signedTransaction}),
+    );
+    final data = _decodeMap(res);
+    if (res.statusCode >= 400) _throwHttp(res, data, 'Apple 购买验证失败');
+    return data;
   }
 
   /// 送礼：走 /v1/chat type=gift，返回完整 chat 响应（含 feedback / reply）
