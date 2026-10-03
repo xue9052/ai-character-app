@@ -7,7 +7,6 @@ import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:in_app_purchase_storekit/in_app_purchase_storekit.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../api/api_exception.dart';
 import '../../api/models.dart';
 import '../../services/app_state.dart';
 import '../../theme/app_theme.dart';
@@ -39,6 +38,7 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
   StreamSubscription<List<PurchaseDetails>>? _purchaseSubscription;
   final Map<String, ProductDetails> _storeProducts = {};
   bool _purchasing = false;
+  int _loadGeneration = 0;
 
   bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
@@ -109,14 +109,21 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
 
   Future<void> _load() async {
     final s = AppStateScope.of(context);
+    final generation = ++_loadGeneration;
+    final showInitialLoading = _catalog == null;
     setState(() {
-      _loading = true;
+      _loading = showInitialLoading;
       _error = null;
     });
     try {
-      final catalogFut = s.api().getVipCatalog();
-      final walletFut = s.api().getWallet(userId: s.userId);
-      final catalog = await catalogFut;
+      final results = await Future.wait<Object?>([
+        s.api().getVipCatalog(),
+        s.api().getWallet(userId: s.userId).then<Object?>((v) => v).catchError(
+              (_) => null,
+            ),
+      ]);
+      final catalog = results[0] as VipCatalogDto;
+      final wallet = results[1] as WalletDto?;
       if (!kIsWeb && Platform.isIOS && catalog.purchaseEnabled) {
         final ids = catalog.subscriptions
             .map((item) => item.appleProductId)
@@ -124,16 +131,13 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
             .toSet();
         if (ids.isNotEmpty && await _store.isAvailable()) {
           final products = await _store.queryProductDetails(ids);
+          if (generation != _loadGeneration) return;
           _storeProducts
             ..clear()
             ..addEntries(products.productDetails.map((p) => MapEntry(p.id, p)));
         }
       }
-      WalletDto? wallet;
-      try {
-        wallet = await walletFut;
-      } catch (_) {/* 余额失败不影响看套餐 */}
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       var selected = 0;
       // 默认选中「热门」或中间档
       for (var i = 0; i < catalog.subscriptions.length; i++) {
@@ -152,7 +156,7 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
         _loading = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _loading = false;
         _error = apiErrorMessage(e);
@@ -172,10 +176,13 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
     return storePrice ?? _fmtPrice(plan.priceCny);
   }
 
+  bool get _applePurchaseAvailable =>
+      !kIsWeb && Platform.isIOS && _catalog?.purchaseEnabled == true;
+
   Future<void> _onPay() async {
     final plan = _plan;
     if (plan == null) return;
-    if (!kIsWeb && Platform.isIOS && _catalog?.purchaseEnabled == true) {
+    if (_applePurchaseAvailable) {
       final s = AppStateScope.of(context);
       final productId = plan.appleProductId.trim();
       if (productId.isEmpty) {
@@ -215,14 +222,18 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.bgDarkElevated,
-        title: const Text('暂未开放支付'),
+        title: Text(
+          !kIsWeb && Platform.isIOS ? 'Apple 内购暂不可用' : '暂未开放支付',
+        ),
         content: Text(
-          _isAndroid
-              ? 'Android 端暂不支持在线开通。\n'
-                  '已选「${plan.title}」（${_planPrice(plan)}），'
-                  '开通后赠送 ${plan.stardustGift} 星尘。\n$hint'
-              : '已选「${plan.title}」（${_planPrice(plan)}），'
-                  '开通后赠送 ${plan.stardustGift} 星尘。\n$hint',
+          !kIsWeb && Platform.isIOS
+              ? '当前后台未启用 Apple 内购。请确认服务器已开启内购并配置 App Store ID、商品 ID 和证书。'
+              : _isAndroid
+                  ? 'Android 端暂不支持在线开通。\n'
+                      '已选「${plan.title}」（${_planPrice(plan)}），'
+                      '开通后赠送 ${plan.stardustGift} 星尘。\n$hint'
+                  : '已选「${plan.title}」（${_planPrice(plan)}），'
+                      '开通后赠送 ${plan.stardustGift} 星尘。\n$hint',
         ),
         actions: [
           TextButton(
@@ -660,7 +671,7 @@ class _MembershipBenefitsPageState extends State<MembershipBenefitsPage> {
             ),
             const SizedBox(height: 10),
             Text(
-              _catalog?.purchaseEnabled == true && !kIsWeb && Platform.isIOS
+              _applePurchaseAvailable
                   ? '开通即表示同意会员服务约定 · 由 Apple 安全处理付款'
                   : '开通即表示同意会员服务约定 · 当前由客服开通',
               textAlign: TextAlign.center,
